@@ -1,0 +1,242 @@
+[build-system]
+requires = ["setuptools>=65.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ai-interviewer"
+version = "0.1.0"
+description = "Adaptive Multimodal AI Interview Platform"
+readme = "README.md"
+requires-python = ">=3.11"
+license = {text = "MIT"}
+authors = [
+    {name = "AI Interviewer Team", email = "team@ai-interviewer.com"}
+]
+keywords = [
+    "interview",
+    "ai",
+    "recruitment",
+    "llm",
+    "langgraph",
+    "voice",
+    "rag"
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Operating System :: OS Independent",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Typing :: Typed",
+]
+
+dependencies = [
+    # Core
+    "fastapi>=0.104.0",
+    "uvicorn[standard]>=0.24.0",
+    "pydantic>=2.0.0",
+    "pydantic-settings>=2.0.0",
+    
+    # LangChain & LLM
+    "langgraph>=0.0.30",
+    "langchain>=0.1.0",
+    "langchain-openai>=0.0.5",
+    "langchain-anthropic>=0.1.0",
+    "langchain-community>=0.0.10",
+    
+    # Database
+    "sqlalchemy>=2.0.0",
+    "psycopg2-binary>=2.9.0",
+    "supabase>=2.0.0",
+    "pgvector>=0.2.0",
+    
+    # Cache & Queue
+    "redis>=5.0.0",
+    "celery>=5.3.0",
+    
+    # Voice
+    "openai>=1.0.0",
+    "python-multipart>=0.0.6",
+    "pydub>=0.25.1",
+    
+    # Utilities
+    "python-dotenv>=1.0.0",
+    "python-jose[cryptography]>=3.3.0",
+    "bcrypt>=4.0.0",
+    "httpx>=0.25.0",
+    "aiofiles>=23.0.0",
+    "tenacity>=8.2.0",
+    
+    # Observability
+    "sentry-sdk>=1.35.0",
+    "prometheus-client>=0.18.0",
+    
+    # Logging
+    "structlog>=23.0.0",
+    "python-json-logger>=2.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    # Testing
+    "pytest>=7.4.0",
+    "pytest-asyncio>=0.21.0",
+    "pytest-cov>=4.1.0",
+    "pytest-mock>=3.11.0",
+    "pytest-xdist>=3.3.0",
+    "httpx-mock>=0.30.0",
+    
+    # Code quality
+    "black>=23.0.0",
+    "isort>=5.12.0",
+    "pylint>=2.17.0",
+    "flake8>=6.0.0",
+    "mypy>=1.5.0",
+    "ruff>=0.1.0",
+    "bandit>=1.7.0",
+    
+    # Development
+    "ipython>=8.12.0",
+    "ipdb>=0.13.0",
+    "pre-commit>=3.4.0",
+    "pytest-watch>=4.2.0",
+]
+
+ml = [
+    "numpy>=1.24.0",
+    "scipy>=1.11.0",
+    "scikit-learn>=1.3.0",
+    "torch>=2.0.0",
+]
+
+rag = [
+    "sentence-transformers>=2.2.0",
+    "rank-bm25>=0.2.0",
+    "pytrec-eval>=0.5",
+]
+
+voice = [
+    "librosa>=0.10.0",
+    "soundfile>=0.12.0",
+    "scipy>=1.11.0",
+]
+
+docs = [
+    "mkdocs>=1.5.0",
+    "mkdocs-material>=9.0.0",
+    "mkdocstrings[python]>=0.23.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/ai-interviewer/platform"
+Documentation = "https://docs.ai-interviewer.com"
+Repository = "https://github.com/ai-interviewer/platform.git"
+Issues = "https://github.com/ai-interviewer/platform/issues"
+
+[tool.black]
+line-length = 100
+target-version = ["py311"]
+include = '\.pyi?$'
+extend-exclude = '''
+/(
+  # directories
+  \.eggs
+  | \.git
+  | \.hg
+  | \.mypy_cache
+  | \.tox
+  | \.venv
+  | _build
+  | buck-out
+  | build
+  | dist
+)/
+'''
+
+[tool.isort]
+profile = "black"
+multi_line_mode = 3
+include_trailing_comma = true
+force_grid_wrap = 0
+use_parentheses = true
+ensure_newline_before_comments = true
+line_length = 100
+skip_glob = ["*/migrations/*"]
+
+[tool.mypy]
+python_version = "3.11"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = false
+disallow_incomplete_defs = false
+check_untyped_defs = false
+no_implicit_optional = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+warn_no_return = true
+strict_equality = true
+
+[tool.pytest.ini_options]
+minversion = "7.0"
+testpaths = ["tests"]
+python_files = "test_*.py"
+python_classes = "Test*"
+python_functions = "test_*"
+asyncio_mode = "auto"
+markers = [
+    "unit: Unit tests",
+    "integration: Integration tests",
+    "e2e: End-to-end tests",
+    "slow: Slow tests",
+    "voice: Voice pipeline tests",
+    "rag: RAG pipeline tests",
+]
+
+[tool.coverage.run]
+source = ["apps", "agents", "rag", "voice", "evaluation", "integrations"]
+omit = [
+    "*/__init__.py",
+    "*/migrations/*",
+    "*/__pycache__/*",
+]
+
+[tool.coverage.report]
+precision = 2
+show_missing = true
+skip_covered = false
+
+[tool.pylint.messages_control]
+disable = [
+    "C0330", "C0326",  # Bad whitespace
+    "R0913",           # Too many arguments
+    "R0914",           # Too many local variables
+    "C0103",           # Invalid name
+]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+select = [
+    "E",    # pycodestyle errors
+    "W",    # pycodestyle warnings
+    "F",    # Pyflakes
+    "I",    # isort
+    "C",    # flake8-comprehensions
+    "B",    # flake8-bugbear
+    "UP",   # pyupgrade
+]
+ignore = [
+    "E501",  # line too long
+    "E701",  # multiple statements on one line
+    "E402",  # module level import not at top
+    "F841",  # local variable assigned but never used
+]
+
+[tool.poetry]
+# Poetry configuration (alternative to pyproject.toml setup)
+name = "ai-interviewer"
+version = "0.1.0"
+description = "Adaptive Multimodal AI Interview Platform"

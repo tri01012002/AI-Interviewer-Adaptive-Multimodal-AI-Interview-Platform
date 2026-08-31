@@ -1,0 +1,222 @@
+version: '3.8'
+
+services:
+  # ==========================================
+  # PostgreSQL Database with pgvector
+  # ==========================================
+  postgres:
+    image: pgvector/pgvector:pg15-latest
+    container_name: ai_interviewer_postgres
+    environment:
+      POSTGRES_USER: ai_interviewer
+      POSTGRES_PASSWORD: ai_interviewer_dev
+      POSTGRES_DB: ai_interviewer
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ai_interviewer"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ==========================================
+  # Redis - Cache & Message Broker
+  # ==========================================
+  redis:
+    image: redis:7-alpine
+    container_name: ai_interviewer_redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ==========================================
+  # FastAPI Backend
+  # ==========================================
+  api:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.api
+    container_name: ai_interviewer_api
+    command: uvicorn apps.api.main:app --host 0.0.0.0 --port 8000 --reload
+    ports:
+      - "8000:8000"
+    environment:
+      DATABASE_URL: postgresql://ai_interviewer:ai_interviewer_dev@postgres:5432/ai_interviewer
+      REDIS_URL: redis://redis:6379/0
+      ENVIRONMENT: development
+      DEBUG: "true"
+    volumes:
+      - .:/app
+      - /app/__pycache__
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # ==========================================
+  # Celery Worker - Background Jobs
+  # ==========================================
+  celery_worker:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.worker
+    container_name: ai_interviewer_worker
+    command: celery -A apps.worker.celery_app worker --loglevel=info
+    environment:
+      DATABASE_URL: postgresql://ai_interviewer:ai_interviewer_dev@postgres:5432/ai_interviewer
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/1
+      CELERY_RESULT_BACKEND: redis://redis:6379/2
+    volumes:
+      - .:/app
+      - /app/__pycache__
+    depends_on:
+      - postgres
+      - redis
+      - api
+
+  # ==========================================
+  # Celery Flower - Task Monitoring
+  # ==========================================
+  flower:
+    image: mher/flower:2.0
+    container_name: ai_interviewer_flower
+    command: celery -A apps.worker.celery_app flower --port=5555
+    ports:
+      - "5555:5555"
+    environment:
+      CELERY_BROKER_URL: redis://redis:6379/1
+      CELERY_RESULT_BACKEND: redis://redis:6379/2
+    depends_on:
+      - redis
+      - celery_worker
+
+  # ==========================================
+  # React Frontend (Optional)
+  # ==========================================
+  web:
+    build:
+      context: ./apps/web
+      dockerfile: Dockerfile
+    container_name: ai_interviewer_web
+    ports:
+      - "3000:3000"
+    environment:
+      REACT_APP_API_URL: http://localhost:8000
+      REACT_APP_WS_URL: ws://localhost:8000/ws
+    volumes:
+      - ./apps/web/src:/app/src
+    depends_on:
+      - api
+    profiles:
+      - frontend  # Enable with: docker-compose --profile frontend up
+
+  # ==========================================
+  # Prometheus - Metrics Collection
+  # ==========================================
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: ai_interviewer_prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./docker/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+    profiles:
+      - monitoring  # Enable with: docker-compose --profile monitoring up
+
+  # ==========================================
+  # Grafana - Metrics Visualization
+  # ==========================================
+  grafana:
+    image: grafana/grafana:latest
+    container_name: ai_interviewer_grafana
+    ports:
+      - "3001:3000"
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_SECURITY_ADMIN_USER: admin
+    volumes:
+      - grafana_data:/var/lib/grafana
+    depends_on:
+      - prometheus
+    profiles:
+      - monitoring
+
+  # ==========================================
+  # pgAdmin - Database Management
+  # ==========================================
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    container_name: ai_interviewer_pgadmin
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@admin.com
+      PGADMIN_DEFAULT_PASSWORD: admin
+    ports:
+      - "5050:80"
+    depends_on:
+      - postgres
+    profiles:
+      - tools  # Enable with: docker-compose --profile tools up
+
+volumes:
+  postgres_data:
+  redis_data:
+  prometheus_data:
+  grafana_data:
+
+networks:
+  default:
+    name: ai_interviewer_network
+
+# Usage:
+# 
+# Start all core services:
+#   docker-compose up -d
+#
+# Start with frontend:
+#   docker-compose --profile frontend up -d
+#
+# Start with monitoring:
+#   docker-compose --profile monitoring up -d
+#
+# Start with tools (pgAdmin):
+#   docker-compose --profile tools up -d
+#
+# Start everything:
+#   docker-compose --profile frontend --profile monitoring --profile tools up -d
+#
+# View logs:
+#   docker-compose logs -f api
+#   docker-compose logs -f celery_worker
+#
+# Stop services:
+#   docker-compose down
+#
+# Rebuild images:
+#   docker-compose build
+#
+# Access:
+#   API: http://localhost:8000
+#   Docs: http://localhost:8000/docs
+#   Frontend: http://localhost:3000
+#   Flower (Tasks): http://localhost:5555
+#   Prometheus: http://localhost:9090
+#   Grafana: http://localhost:3001
+#   pgAdmin: http://localhost:5050
