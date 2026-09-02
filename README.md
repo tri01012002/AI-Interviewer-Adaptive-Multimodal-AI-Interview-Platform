@@ -5,7 +5,6 @@
 Transform recruitment with AI-powered adaptive interviews that automatically adjust questions based on candidate responses, leverage knowledge bases, evaluate answers objectively, and generate comprehensive reports.
 
 [![GitHub](https://img.shields.io/badge/GitHub-Repository-blue)](https://github.com/ai-interviewer/platform)
-[![License](https://img.shields.io/badge/License-MIT-green)](LICENSE)
 [![Python](https://img.shields.io/badge/Python-3.11+-blue)](https://www.python.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-Latest-teal)](https://fastapi.tiangolo.com/)
 
