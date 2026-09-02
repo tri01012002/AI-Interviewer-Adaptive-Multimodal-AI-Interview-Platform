@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>AI Interviewer Demo</title>
+    <style>
+      body {
+        font-family: Arial, sans-serif;
+        max-width: 980px;
+        margin: 40px auto;
+        padding: 24px;
+        background: #101827;
+        color: #f3f4f6;
+      }
+      .panel {
+        background: #111827;
+        border: 1px solid #374151;
+        border-radius: 16px;
+        padding: 20px;
+        margin-bottom: 20px;
+      }
+      input, button, textarea {
+        width: 100%;
+        box-sizing: border-box;
+        padding: 12px 14px;
+        border-radius: 10px;
+        border: 1px solid #374151;
+        margin-top: 10px;
+        background: #0f172a;
+        color: white;
+      }
+      button {
+        background: linear-gradient(90deg, #4f46e5, #7c3aed);
+        border: none;
+        cursor: pointer;
+        font-weight: bold;
+      }
+      #messages {
+        min-height: 120px;
+        max-height: 280px;
+        overflow-y: auto;
+        border: 1px solid #374151;
+        border-radius: 10px;
+        padding: 12px;
+        background: rgba(15, 23, 42, 0.8);
+      }
+      .note { color: #a5b4fc; }
+    </style>
+  </head>
+  <body>
+    <h1>AI Interviewer Demo</h1>
+
+    <div class="panel">
+      <h3>Login</h3>
+      <input id="email" placeholder="admin@example.com" value="admin@example.com" />
+      <input id="password" type="password" placeholder="password" value="secret123" />
+      <button id="loginBtn">Login</button>
+      <p id="tokenLabel" class="note"></p>
+    </div>
+
+    <div class="panel">
+      <h3>Create Candidate</h3>
+      <input id="candidateName" placeholder="Candidate name" value="Jane Doe" />
+      <input id="candidateEmail" placeholder="Candidate email" value="jane@example.com" />
+      <button id="candidateBtn">Create Candidate</button>
+      <p id="candidateLabel" class="note"></p>
+    </div>
+
+    <div class="panel">
+      <h3>Start Interview</h3>
+      <input id="position" placeholder="AI Engineer" value="AI Engineer" />
+      <button id="startInterviewBtn">Start Interview</button>
+      <p id="interviewLabel" class="note"></p>
+    </div>
+
+    <div class="panel">
+      <h3>Answer</h3>
+      <textarea id="answer" rows="5">I have worked with Python, PyTorch, and YOLOv8 for computer vision. I also deployed a model to production and optimized inference latency.</textarea>
+      <button id="answerBtn">Submit Answer</button>
+      <p id="answerLabel" class="note"></p>
+    </div>
+
+    <div class="panel">
+      <h3>Live WebSocket Feed</h3>
+      <div id="messages"></div>
+    </div>
+
+    <script>
+      const state = { token: '', interviewId: '' };
+      const ws = new WebSocket(`ws://${location.host}/ws/interview/demo`);
+
+      ws.onopen = () => {
+        appendMessage('WebSocket connected');
+      };
+      ws.onmessage = (event) => {
+        appendMessage(event.data);
+      };
+      ws.onclose = () => appendMessage('WebSocket closed');
+
+      function appendMessage(message) {
+        const el = document.getElementById('messages');
+        const row = document.createElement('div');
+        row.textContent = new Date().toLocaleTimeString() + ' - ' + message;
+        el.appendChild(row);
+        el.scrollTop = el.scrollHeight;
+      }
+
+      async function postJson(url, payload, headers = {}) {
+        const response = await fetch(url, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            ...headers,
+          },
+          body: JSON.stringify(payload),
+        });
+        return response.json();
+      }
+
+      document.getElementById('loginBtn').addEventListener('click', async () => {
+        const payload = {
+          email: document.getElementById('email').value,
+          password: document.getElementById('password').value,
+        };
+        const data = await postJson('/api/v1/auth/login', payload);
+        state.token = data.access_token;
+        document.getElementById('tokenLabel').textContent = `Token: ${state.token.slice(0, 24)}...`;
+      });
+
+      document.getElementById('candidateBtn').addEventListener('click', async () => {
+        const payload = {
+          name: document.getElementById('candidateName').value,
+          email: document.getElementById('candidateEmail').value,
+          phone: '0900',
+          resume_url: 'https://example.com/resume.pdf',
+        };
+        const data = await postJson('/api/v1/candidates', payload, { Authorization: `Bearer ${state.token}` });
+        document.getElementById('candidateLabel').textContent = JSON.stringify(data);
+      });
+
+      document.getElementById('startInterviewBtn').addEventListener('click', async () => {
+        const payload = {
+          candidate_id: 'frontend-demo-candidate',
+          position: document.getElementById('position').value,
+          mode: 'text',
+        };
+        const data = await postJson('/api/v1/interview/start', payload);
+        state.interviewId = data.interview_id;
+        document.getElementById('interviewLabel').textContent = JSON.stringify(data);
+      });
+
+      document.getElementById('answerBtn').addEventListener('click', async () => {
+        const payload = { answer: document.getElementById('answer').value };
+        const data = await postJson(`/api/v1/interview/${state.interviewId}/answer`, payload);
+        document.getElementById('answerLabel').textContent = JSON.stringify(data);
+        ws.send(JSON.stringify({ type: 'answer_submitted', interview_id: state.interviewId, payload: data }));
+      });
+    </script>
+  </body>
+</html>

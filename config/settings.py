@@ -29,7 +29,9 @@ class Settings(BaseSettings):
     ALLOWED_ORIGINS: list[str] = ["http://localhost:3000", "http://localhost:8000"]
 
     # Database
-    DATABASE_URL: str = "postgresql://user:password@localhost:5432/ai_interviewer"
+    # Default is SQLite for local/dev reliability; set DATABASE_URL to a PostgreSQL DSN
+    # in production environments where a managed database is available.
+    DATABASE_URL: str = "sqlite:///./storage/ai_interviewer.db"
     SQLALCHEMY_ECHO: bool = False
 
     # Redis

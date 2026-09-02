@@ -10,8 +10,11 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 
 from config import settings
+from services.database import init_db
+from services.user_store import UserStore
 from utils import get_logger, setup_logging
 
 # Initialize logging
@@ -24,6 +27,8 @@ async def lifespan(app: FastAPI):
     """Application lifespan context manager"""
     
     # Startup
+    init_db()
+    UserStore.ensure_default_admin()
     logger.info(
         "Starting AI Interviewer",
         environment=settings.ENVIRONMENT,
@@ -111,13 +116,17 @@ async def liveness_check():
 # API Routes (to be implemented)
 # ==========================================
 
-# TODO: Import and include routers
-# from apps.api.v1.routes import interview, evaluation, candidate, admin
-#
-# app.include_router(interview.router, prefix=settings.API_PREFIX, tags=["Interview"])
-# app.include_router(evaluation.router, prefix=settings.API_PREFIX, tags=["Evaluation"])
-# app.include_router(candidate.router, prefix=settings.API_PREFIX, tags=["Candidate"])
-# app.include_router(admin.router, prefix=settings.API_PREFIX, tags=["Admin"])
+from apps.api.v1.routes.auth import router as auth_router
+from apps.api.v1.routes.candidate import router as candidate_router
+from apps.api.v1.routes.interview import router as interview_router
+from apps.api.websocket.interview import router as websocket_router
+
+app.include_router(auth_router, prefix=settings.API_PREFIX)
+app.include_router(candidate_router, prefix=settings.API_PREFIX)
+app.include_router(interview_router, prefix=settings.API_PREFIX)
+app.include_router(websocket_router)
+
+app.mount("/web", StaticFiles(directory="apps/web/src"), name="web")
 
 # ==========================================
 # WebSocket Routes (to be implemented)
