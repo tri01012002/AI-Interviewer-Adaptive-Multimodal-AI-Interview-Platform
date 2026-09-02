@@ -16,7 +16,7 @@ class LoginRequest(BaseModel):
 
 
 class RegisterRequest(LoginRequest):
-    role: str = "admin"
+    role: str = "candidate"
 
 
 @router.post("/auth/register", tags=["Auth"])

@@ -26,7 +26,10 @@ async def lifespan(app: FastAPI):
     """Application lifespan context manager"""
     
     # Startup
-    UserStore.ensure_default_admin()
+    if settings.ENVIRONMENT == "development" and settings.ENABLE_DEV_ADMIN_BOOTSTRAP:
+        if not settings.BOOTSTRAP_ADMIN_EMAIL or not settings.BOOTSTRAP_ADMIN_PASSWORD:
+            raise RuntimeError("Development admin bootstrap requires explicit credentials")
+        UserStore.ensure_default_admin(settings.BOOTSTRAP_ADMIN_EMAIL, settings.BOOTSTRAP_ADMIN_PASSWORD)
     logger.info(
         "Starting AI Interviewer",
         environment=settings.ENVIRONMENT,

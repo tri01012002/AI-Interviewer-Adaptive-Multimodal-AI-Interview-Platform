@@ -43,6 +43,9 @@ class Settings(BaseSettings):
     ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
     REFRESH_TOKEN_EXPIRE_DAYS: int = 7
+    ENABLE_DEV_ADMIN_BOOTSTRAP: bool = False
+    BOOTSTRAP_ADMIN_EMAIL: str = ""
+    BOOTSTRAP_ADMIN_PASSWORD: str = ""
 
     # CORS
     CORS_ALLOW_CREDENTIALS: bool = True
@@ -51,6 +54,10 @@ class Settings(BaseSettings):
 
     # LLM Providers
     OPENAI_API_KEY: str = ""
+    LLM_PROVIDER: str = "none"
+    LLM_TIMEOUT_SECONDS: float = 20.0
+    LLM_MAX_RETRIES: int = 1
+    OPENAI_BASE_URL: str = "https://api.openai.com/v1"
     OPENAI_MODEL: str = "gpt-4-turbo-preview"
     OPENAI_TEMPERATURE: float = 0.7
     OPENAI_MAX_TOKENS: int = 2000
@@ -72,6 +79,22 @@ class Settings(BaseSettings):
     VAD_SAMPLE_RATE: int = 16000
     STT_LANGUAGE: str = "en-US"
     TTS_SPEED: float = 1.0
+    VOICE_ENABLED: bool = True
+    VOICE_MAX_AUDIO_CHUNK_BYTES: int = 64 * 1024
+    VOICE_MAX_BUFFER_BYTES: int = 2 * 1024 * 1024
+    VOICE_MAX_UTTERANCE_SECONDS: int = 120
+    VOICE_WS_MAX_MESSAGE_BYTES: int = 128 * 1024
+    VOICE_WS_IDLE_TIMEOUT_SECONDS: int = 300
+    VAD_PROVIDER: str = "fake"
+    STT_PROVIDER: str = "fake"
+    STT_MODEL: str = "local-fake"
+    STT_TIMEOUT_SECONDS: float = 20.0
+    STT_MAX_RETRIES: int = 1
+    TTS_PROVIDER: str = "fake"
+    TTS_MODEL: str = "local-fake"
+    TTS_TIMEOUT_SECONDS: float = 20.0
+    TTS_MAX_RETRIES: int = 1
+    VOICE_TELEMETRY_ENABLED: bool = True
 
     # RAG Configuration
     VECTOR_STORE_PROVIDER: str = "supabase"
@@ -86,6 +109,7 @@ class Settings(BaseSettings):
     DEFAULT_INTERVIEW_DURATION: int = 1800  # 30 minutes
     DEFAULT_NUM_QUESTIONS: int = 8
     DEFAULT_DIFFICULTY: str = "medium"
+    TURN_PROCESSING_LEASE_SECONDS: int = 300
     MIN_CONFIDENCE_THRESHOLD: float = 0.6
     FAIRNESS_CHECK_ENABLED: bool = True
 

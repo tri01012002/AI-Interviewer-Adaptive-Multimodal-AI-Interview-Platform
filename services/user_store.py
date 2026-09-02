@@ -12,7 +12,7 @@ from services.security_utils import hash_password
 
 class UserStore:
     @classmethod
-    def create(cls, email: str, password: str, role: str = "admin") -> dict[str, Any]:
+    def create(cls, email: str, password: str, role: str = "candidate") -> dict[str, Any]:
         with SessionLocal() as session:
             existing = session.execute(select(UserRecord).where(UserRecord.email == email)).scalar_one_or_none()
             if existing is not None:

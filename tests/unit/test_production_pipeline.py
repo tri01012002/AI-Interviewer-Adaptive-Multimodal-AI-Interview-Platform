@@ -28,18 +28,30 @@ def test_auth_and_candidate_flow():
 
 
 def test_interview_report_export_flow():
+    login = client.post(
+        "/api/v1/auth/login",
+        json={"email": "admin@example.com", "password": "secret123"},
+    )
+    assert login.status_code == 200
+    token = login.json()["access_token"]
     start = client.post(
         "/api/v1/interview/start",
         json={"candidate_id": "candidate-abc", "position": "AI Engineer", "mode": "text"},
+        headers={"Authorization": f"Bearer {token}"},
     )
     interview_id = start.json()["interview_id"]
 
     client.post(
         f"/api/v1/interview/{interview_id}/answer",
-        json={"answer": "I have built Python and PyTorch models and deployed them to production."},
+        json={"turn_id": "turn-report-1", "answer": "I have built Python and PyTorch models and deployed them to production."},
+        headers={"Authorization": f"Bearer {token}"},
     )
 
-    report = client.post(f"/api/v1/interview/{interview_id}/report", params={"format": "json"})
+    report = client.post(
+        f"/api/v1/interview/{interview_id}/report",
+        params={"format": "json"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
     assert report.status_code == 200
     payload = report.json()
     assert payload["interview_id"] == interview_id

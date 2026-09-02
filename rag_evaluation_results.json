@@ -1,0 +1,505 @@
+{
+  "dataset_version": "golden-v1",
+  "strategies": {
+    "bm25": {
+      "dataset_version": "golden-v1",
+      "rows": [
+        {
+          "query": "How would you handle Python async I/O concurrency?",
+          "metrics": {
+            "1": {
+              "recall": 0.5,
+              "precision": 1.0,
+              "mrr": 1.0,
+              "ndcg": 1.0
+            },
+            "3": {
+              "recall": 1.0,
+              "precision": 1.0,
+              "mrr": 1.0,
+              "ndcg": 1.0
+            },
+            "5": {
+              "recall": 1.0,
+              "precision": 1.0,
+              "mrr": 1.0,
+              "ndcg": 1.0
+            },
+            "10": {
+              "recall": 1.0,
+              "precision": 1.0,
+              "mrr": 1.0,
+              "ndcg": 1.0
+            }
+          }
+        },
+        {
+          "query": "What does Redis cache invalidation require?",
+          "metrics": {
+            "1": {
+              "recall": 1.0,
+              "precision": 1.0,
+              "mrr": 1.0,
+              "ndcg": 1.0
+            },
+            "3": {
+              "recall": 1.0,
+              "precision": 1.0,
+              "mrr": 1.0,
+              "ndcg": 1.0
+            },
+            "5": {
+              "recall": 1.0,
+              "precision": 1.0,
+              "mrr": 1.0,
+              "ndcg": 1.0
+            },
+            "10": {
+              "recall": 1.0,
+              "precision": 1.0,
+              "mrr": 1.0,
+              "ndcg": 1.0
+            }
+          }
+        },
+        {
+          "query": "Explain PostgreSQL isolation levels and anomalies.",
+          "metrics": {
+            "1": {
+              "recall": 1.0,
+              "precision": 1.0,
+              "mrr": 1.0,
+              "ndcg": 1.0
+            },
+            "3": {
+              "recall": 1.0,
+              "precision": 1.0,
+              "mrr": 1.0,
+              "ndcg": 1.0
+            },
+            "5": {
+              "recall": 1.0,
+              "precision": 1.0,
+              "mrr": 1.0,
+              "ndcg": 1.0
+            },
+            "10": {
+              "recall": 1.0,
+              "precision": 1.0,
+              "mrr": 1.0,
+              "ndcg": 1.0
+            }
+          }
+        },
+        {
+          "query": "How do you monitor production model latency?",
+          "metrics": {
+            "1": {
+              "recall": 1.0,
+              "precision": 1.0,
+              "mrr": 1.0,
+              "ndcg": 1.0
+            },
+            "3": {
+              "recall": 1.0,
+              "precision": 1.0,
+              "mrr": 1.0,
+              "ndcg": 1.0
+            },
+            "5": {
+              "recall": 1.0,
+              "precision": 1.0,
+              "mrr": 1.0,
+              "ndcg": 1.0
+            },
+            "10": {
+              "recall": 1.0,
+              "precision": 1.0,
+              "mrr": 1.0,
+              "ndcg": 1.0
+            }
+          }
+        }
+      ],
+      "mean_latency_ms": 0.1145249989349395,
+      "p50_latency_ms": 0.08499999967170879,
+      "p95_latency_ms": 0.2494000000297092,
+      "max_latency_ms": 0.2494000000297092
+    },
+    "dense": {
+      "dataset_version": "golden-v1",
+      "rows": [
+        {
+          "query": "How would you handle Python async I/O concurrency?",
+          "metrics": {
+            "1": {
+              "recall": 0.5,
+              "precision": 1.0,
+              "mrr": 1.0,
+              "ndcg": 1.0
+            },
+            "3": {
+              "recall": 1.0,
+              "precision": 1.0,
+              "mrr": 1.0,
+              "ndcg": 1.0
+            },
+            "5": {
+              "recall": 1.0,
+              "precision": 1.0,
+              "mrr": 1.0,
+              "ndcg": 1.0
+            },
+            "10": {
+              "recall": 1.0,
+              "precision": 1.0,
+              "mrr": 1.0,
+              "ndcg": 1.0
+            }
+          }
+        },
+        {
+          "query": "What does Redis cache invalidation require?",
+          "metrics": {
+            "1": {
+              "recall": 1.0,
+              "precision": 1.0,
+              "mrr": 1.0,
+              "ndcg": 1.0
+            },
+            "3": {
+              "recall": 1.0,
+              "precision": 1.0,
+              "mrr": 1.0,
+              "ndcg": 1.0
+            },
+            "5": {
+              "recall": 1.0,
+              "precision": 1.0,
+              "mrr": 1.0,
+              "ndcg": 1.0
+            },
+            "10": {
+              "recall": 1.0,
+              "precision": 1.0,
+              "mrr": 1.0,
+              "ndcg": 1.0
+            }
+          }
+        },
+        {
+          "query": "Explain PostgreSQL isolation levels and anomalies.",
+          "metrics": {
+            "1": {
+              "recall": 1.0,
+              "precision": 1.0,
+              "mrr": 1.0,
+              "ndcg": 1.0
+            },
+            "3": {
+              "recall": 1.0,
+              "precision": 1.0,
+              "mrr": 1.0,
+              "ndcg": 1.0
+            },
+            "5": {
+              "recall": 1.0,
+              "precision": 1.0,
+              "mrr": 1.0,
+              "ndcg": 1.0
+            },
+            "10": {
+              "recall": 1.0,
+              "precision": 1.0,
+              "mrr": 1.0,
+              "ndcg": 1.0
+            }
+          }
+        },
+        {
+          "query": "How do you monitor production model latency?",
+          "metrics": {
+            "1": {
+              "recall": 1.0,
+              "precision": 1.0,
+              "mrr": 1.0,
+              "ndcg": 1.0
+            },
+            "3": {
+              "recall": 1.0,
+              "precision": 1.0,
+              "mrr": 1.0,
+              "ndcg": 1.0
+            },
+            "5": {
+              "recall": 1.0,
+              "precision": 1.0,
+              "mrr": 1.0,
+              "ndcg": 1.0
+            },
+            "10": {
+              "recall": 1.0,
+              "precision": 1.0,
+              "mrr": 1.0,
+              "ndcg": 1.0
+            }
+          }
+        }
+      ],
+      "mean_latency_ms": 0.090975001512561,
+      "p50_latency_ms": 0.09789999603526667,
+      "p95_latency_ms": 0.12210000568302348,
+      "max_latency_ms": 0.12210000568302348
+    },
+    "hybrid": {
+      "dataset_version": "golden-v1",
+      "rows": [
+        {
+          "query": "How would you handle Python async I/O concurrency?",
+          "metrics": {
+            "1": {
+              "recall": 0.5,
+              "precision": 1.0,
+              "mrr": 1.0,
+              "ndcg": 1.0
+            },
+            "3": {
+              "recall": 1.0,
+              "precision": 1.0,
+              "mrr": 1.0,
+              "ndcg": 1.0
+            },
+            "5": {
+              "recall": 1.0,
+              "precision": 1.0,
+              "mrr": 1.0,
+              "ndcg": 1.0
+            },
+            "10": {
+              "recall": 1.0,
+              "precision": 1.0,
+              "mrr": 1.0,
+              "ndcg": 1.0
+            }
+          }
+        },
+        {
+          "query": "What does Redis cache invalidation require?",
+          "metrics": {
+            "1": {
+              "recall": 1.0,
+              "precision": 1.0,
+              "mrr": 1.0,
+              "ndcg": 1.0
+            },
+            "3": {
+              "recall": 1.0,
+              "precision": 1.0,
+              "mrr": 1.0,
+              "ndcg": 1.0
+            },
+            "5": {
+              "recall": 1.0,
+              "precision": 1.0,
+              "mrr": 1.0,
+              "ndcg": 1.0
+            },
+            "10": {
+              "recall": 1.0,
+              "precision": 1.0,
+              "mrr": 1.0,
+              "ndcg": 1.0
+            }
+          }
+        },
+        {
+          "query": "Explain PostgreSQL isolation levels and anomalies.",
+          "metrics": {
+            "1": {
+              "recall": 1.0,
+              "precision": 1.0,
+              "mrr": 1.0,
+              "ndcg": 1.0
+            },
+            "3": {
+              "recall": 1.0,
+              "precision": 1.0,
+              "mrr": 1.0,
+              "ndcg": 1.0
+            },
+            "5": {
+              "recall": 1.0,
+              "precision": 1.0,
+              "mrr": 1.0,
+              "ndcg": 1.0
+            },
+            "10": {
+              "recall": 1.0,
+              "precision": 1.0,
+              "mrr": 1.0,
+              "ndcg": 1.0
+            }
+          }
+        },
+        {
+          "query": "How do you monitor production model latency?",
+          "metrics": {
+            "1": {
+              "recall": 1.0,
+              "precision": 1.0,
+              "mrr": 1.0,
+              "ndcg": 1.0
+            },
+            "3": {
+              "recall": 1.0,
+              "precision": 1.0,
+              "mrr": 1.0,
+              "ndcg": 1.0
+            },
+            "5": {
+              "recall": 1.0,
+              "precision": 1.0,
+              "mrr": 1.0,
+              "ndcg": 1.0
+            },
+            "10": {
+              "recall": 1.0,
+              "precision": 1.0,
+              "mrr": 1.0,
+              "ndcg": 1.0
+            }
+          }
+        }
+      ],
+      "mean_latency_ms": 0.17174999811686575,
+      "p50_latency_ms": 0.14769999688724056,
+      "p95_latency_ms": 0.27209999825572595,
+      "max_latency_ms": 0.27209999825572595
+    },
+    "hybrid_reranker": {
+      "dataset_version": "golden-v1",
+      "rows": [
+        {
+          "query": "How would you handle Python async I/O concurrency?",
+          "metrics": {
+            "1": {
+              "recall": 0.5,
+              "precision": 1.0,
+              "mrr": 1.0,
+              "ndcg": 1.0
+            },
+            "3": {
+              "recall": 1.0,
+              "precision": 1.0,
+              "mrr": 1.0,
+              "ndcg": 1.0
+            },
+            "5": {
+              "recall": 1.0,
+              "precision": 1.0,
+              "mrr": 1.0,
+              "ndcg": 1.0
+            },
+            "10": {
+              "recall": 1.0,
+              "precision": 1.0,
+              "mrr": 1.0,
+              "ndcg": 1.0
+            }
+          }
+        },
+        {
+          "query": "What does Redis cache invalidation require?",
+          "metrics": {
+            "1": {
+              "recall": 1.0,
+              "precision": 1.0,
+              "mrr": 1.0,
+              "ndcg": 1.0
+            },
+            "3": {
+              "recall": 1.0,
+              "precision": 1.0,
+              "mrr": 1.0,
+              "ndcg": 1.0
+            },
+            "5": {
+              "recall": 1.0,
+              "precision": 1.0,
+              "mrr": 1.0,
+              "ndcg": 1.0
+            },
+            "10": {
+              "recall": 1.0,
+              "precision": 1.0,
+              "mrr": 1.0,
+              "ndcg": 1.0
+            }
+          }
+        },
+        {
+          "query": "Explain PostgreSQL isolation levels and anomalies.",
+          "metrics": {
+            "1": {
+              "recall": 1.0,
+              "precision": 1.0,
+              "mrr": 1.0,
+              "ndcg": 1.0
+            },
+            "3": {
+              "recall": 1.0,
+              "precision": 1.0,
+              "mrr": 1.0,
+              "ndcg": 1.0
+            },
+            "5": {
+              "recall": 1.0,
+              "precision": 1.0,
+              "mrr": 1.0,
+              "ndcg": 1.0
+            },
+            "10": {
+              "recall": 1.0,
+              "precision": 1.0,
+              "mrr": 1.0,
+              "ndcg": 1.0
+            }
+          }
+        },
+        {
+          "query": "How do you monitor production model latency?",
+          "metrics": {
+            "1": {
+              "recall": 1.0,
+              "precision": 1.0,
+              "mrr": 1.0,
+              "ndcg": 1.0
+            },
+            "3": {
+              "recall": 1.0,
+              "precision": 1.0,
+              "mrr": 1.0,
+              "ndcg": 1.0
+            },
+            "5": {
+              "recall": 1.0,
+              "precision": 1.0,
+              "mrr": 1.0,
+              "ndcg": 1.0
+            },
+            "10": {
+              "recall": 1.0,
+              "precision": 1.0,
+              "mrr": 1.0,
+              "ndcg": 1.0
+            }
+          }
+        }
+      ],
+      "mean_latency_ms": 0.15667500156268943,
+      "p50_latency_ms": 0.14060000103199854,
+      "p95_latency_ms": 0.2114000017172657,
+      "max_latency_ms": 0.2114000017172657
+    }
+  }
+}

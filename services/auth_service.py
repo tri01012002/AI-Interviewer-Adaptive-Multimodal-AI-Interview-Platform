@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import jwt
-from fastapi import HTTPException, status
+from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from config import settings
@@ -17,7 +17,7 @@ security = HTTPBearer(auto_error=False)
 
 
 def register_user(email: str, password: str, role: str = "admin") -> dict[str, Any]:
-    return UserStore.create(email=email, password=password, role=role)
+    return UserStore.create(email=email, password=password, role="candidate")
 
 
 def authenticate_user(email: str, password: str) -> dict[str, Any]:
@@ -48,3 +48,12 @@ def get_current_user(credentials: HTTPAuthorizationCredentials | None) -> dict[s
     if credentials is None or credentials.scheme.lower() != "bearer":
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing bearer token")
     return decode_token(credentials.credentials)
+
+
+def current_user(credentials: HTTPAuthorizationCredentials | None = Depends(security)) -> dict[str, Any]:
+    """FastAPI dependency that rejects unauthenticated resource requests."""
+    claims = get_current_user(credentials)
+    user = UserStore.get_by_email(str(claims.get("sub", "")))
+    if user is None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
+    return {**claims, "id": user["id"], "role": user["role"]}
