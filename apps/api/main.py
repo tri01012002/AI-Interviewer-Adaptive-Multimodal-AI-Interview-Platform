@@ -13,7 +13,6 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from config import settings
-from services.database import init_db
 from services.user_store import UserStore
 from utils import get_logger, setup_logging
 
@@ -27,7 +26,6 @@ async def lifespan(app: FastAPI):
     """Application lifespan context manager"""
     
     # Startup
-    init_db()
     UserStore.ensure_default_admin()
     logger.info(
         "Starting AI Interviewer",

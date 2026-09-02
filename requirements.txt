@@ -13,6 +13,7 @@ langchain-community==0.0.13
 
 # Database
 sqlalchemy==2.0.23
+alembic==1.16.5
 psycopg2-binary==2.9.9
 supabase==2.0.0
 pgvector==0.2.3
