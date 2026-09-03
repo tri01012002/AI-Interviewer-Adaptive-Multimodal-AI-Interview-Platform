@@ -17,6 +17,31 @@ class TTSProvider(Protocol):
     async def stream(self, text: str) -> AsyncIterator[bytes]: ...
     async def close(self) -> None: ...
 
+def get_provider(provider_name: str, provider_type: str, **kwargs) -> VADProvider | STTProvider | TTSProvider:
+    """Factory function for provider selection."""
+    if provider_type == "vad":
+        if provider_name == "fake":
+            return FakeVADProvider()
+        raise ValueError(f"Unknown VAD provider: {provider_name}")
+    
+    if provider_type == "stt":
+        if provider_name == "fake":
+            return FakeSTTProvider()
+        elif provider_name == "assemblylabs":
+            from voice.real_providers import AssemblyAISTTProvider
+            return AssemblyAISTTProvider(**kwargs)
+        raise ValueError(f"Unknown STT provider: {provider_name}")
+    
+    if provider_type == "tts":
+        if provider_name == "fake":
+            return FakeTTSProvider()
+        elif provider_name == "elevenlabs":
+            from voice.real_providers import ElevenLabsTTSProvider
+            return ElevenLabsTTSProvider(**kwargs)
+        raise ValueError(f"Unknown TTS provider: {provider_name}")
+    
+    raise ValueError(f"Unknown provider type: {provider_type}")
+
 class FakeVADProvider:
     async def detect(self, audio: bytes, audio_format: AudioFormat) -> bool:
         return bool(audio)

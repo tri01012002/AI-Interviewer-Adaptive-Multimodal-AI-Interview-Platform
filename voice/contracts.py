@@ -20,14 +20,21 @@ class VoiceErrorCode(StrEnum):
     INTERVIEW_FORBIDDEN = "VOICE_INTERVIEW_FORBIDDEN"
     STT_ERROR = "STT_PROVIDER_ERROR"
     STT_TIMEOUT = "STT_TIMEOUT"
+    STT_RATE_LIMITED = "STT_RATE_LIMITED"
+    STT_AUTH_ERROR = "STT_AUTH_ERROR"
     TURN_COMMIT_FAILED = "TURN_COMMIT_FAILED"
     TTS_ERROR = "TTS_PROVIDER_ERROR"
+    TTS_TIMEOUT = "TTS_TIMEOUT"
+    TTS_RATE_LIMITED = "TTS_RATE_LIMITED"
+    PROTOCOL_ERROR = "VOICE_PROTOCOL_ERROR"
+    SESSION_ERROR = "VOICE_SESSION_ERROR"
 
 class ClientVoiceEvent(BaseModel):
     type: VoiceEventType
     utterance_id: str | None = Field(default=None, min_length=1)
     audio_format: str | None = None
     audio_base64: str | None = None
+    timestamp: int | None = None
 
     @classmethod
     def parse_json(cls, payload: str, max_bytes: int) -> "ClientVoiceEvent":
@@ -44,13 +51,24 @@ class VoiceServerEvent(BaseModel):
     question: str | None = None
     code: VoiceErrorCode | None = None
     message: str | None = None
+    timestamp: int | None = None
+    provider: str | None = None
+    model: str | None = None
+    confidence: float | None = None
 
 class STTEvent(BaseModel):
     utterance_id: str
     text: str
     is_final: bool = False
+    confidence: float | None = None
+    timestamp: int | None = None
 
 class AudioFormat(BaseModel):
     encoding: Literal["pcm_s16le"] = "pcm_s16le"
     sample_rate: Literal[16000] = 16000
     channels: Literal[1] = 1
+
+class TTSAudioEvent(BaseModel):
+    audio_bytes: bytes
+    is_final: bool = False
+    sequence: int = 0

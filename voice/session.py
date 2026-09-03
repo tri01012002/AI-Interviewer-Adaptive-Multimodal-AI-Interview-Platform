@@ -74,32 +74,83 @@ class VoiceSessionService:
                 events.append(VoiceServerEvent(type="transcript.partial", session_id=self.session_id, utterance_id=transcript.utterance_id, text=transcript.text))
         return events
 
+    async def _audio_chunk_binary(self, utterance_id: str, audio: bytes) -> list[VoiceServerEvent]:
+        """Handle binary audio chunk (raw PCM16 bytes)."""
+        if len(audio) > self.max_chunk_bytes:
+            return [self.error(VoiceErrorCode.AUDIO_TOO_LARGE, "Audio chunk exceeds the size limit.")]
+        if sum(len(item) for item in self.buffers.values()) + len(audio) > self.max_buffer_bytes:
+            return [self.error(VoiceErrorCode.BUFFER_OVERFLOW, "Audio buffer is full.")]
+        if len(self.buffers[utterance_id]) + len(audio) > self.max_utterance_bytes:
+            return [self.error(VoiceErrorCode.AUDIO_TOO_LARGE, "Utterance exceeds the duration limit.")]
+        
+        self.buffers[utterance_id].extend(audio)
+        
+        if not await self.vad.detect(audio, self.audio_format):
+            return []
+        
+        events = []
+        async for transcript in self.stt.send_audio(utterance_id, audio):
+            if not transcript.is_final:
+                events.append(VoiceServerEvent(
+                    type="transcript.partial",
+                    session_id=self.session_id,
+                    utterance_id=transcript.utterance_id,
+                    text=transcript.text,
+                    confidence=transcript.confidence,
+                ))
+        return events
+
     async def _audio_end(self, interview_id: str, event: ClientVoiceEvent) -> list[VoiceServerEvent]:
         if not event.utterance_id:
             return [self.error(VoiceErrorCode.INVALID_EVENT, "utterance_id is required.")]
         events: list[VoiceServerEvent] = []
-        async for transcript in self.stt.end_utterance(event.utterance_id):
-            if not transcript.is_final or not transcript.text.strip():
-                return [self.error(VoiceErrorCode.STT_ERROR, "STT did not produce a final transcript.")]
-            if event.utterance_id in self.committed:
-                result = self.committed[event.utterance_id]
-            else:
-                events.append(VoiceServerEvent(type="transcript.final", session_id=self.session_id, utterance_id=event.utterance_id, text=transcript.text))
+        
+        try:
+            async for transcript in self.stt.end_utterance(event.utterance_id):
+                if not transcript.is_final or not transcript.text.strip():
+                    return [self.error(VoiceErrorCode.STT_ERROR, "STT did not produce a final transcript.")]
+                if event.utterance_id in self.committed:
+                    result = self.committed[event.utterance_id]
+                else:
+                    events.append(VoiceServerEvent(
+                        type="transcript.final",
+                        session_id=self.session_id,
+                        utterance_id=event.utterance_id,
+                        text=transcript.text,
+                        confidence=transcript.confidence,
+                    ))
+                    try:
+                        result = self.interview_service.submit_answer(interview_id, transcript.text, event.utterance_id, self.user_id, self.role)
+                    except Exception as exc:
+                        logger.exception("Interview processing failed")
+                        self.buffers.pop(event.utterance_id, None)
+                        return [self.error(VoiceErrorCode.TURN_COMMIT_FAILED, "Interview processing failed; please retry.")]
+                    self.committed[event.utterance_id] = result
+                
+                events.append(VoiceServerEvent(type="interview.question", session_id=self.session_id, utterance_id=event.utterance_id, question=result.get("current_question")))
+                events.append(VoiceServerEvent(type="tts.started", session_id=self.session_id, utterance_id=event.utterance_id, question=result.get("current_question")))
                 try:
-                    result = self.interview_service.submit_answer(interview_id, transcript.text, event.utterance_id, self.user_id, self.role)
-                except Exception:
-                    self.buffers.pop(event.utterance_id, None)
-                    return [self.error(VoiceErrorCode.TURN_COMMIT_FAILED, "Interview processing failed; please retry.")]
-                self.committed[event.utterance_id] = result
-            events.append(VoiceServerEvent(type="interview.question", session_id=self.session_id, utterance_id=event.utterance_id, question=result.get("current_question")))
-            events.append(VoiceServerEvent(type="tts.started", session_id=self.session_id, utterance_id=event.utterance_id, question=result.get("current_question")))
-            try:
-                async for audio in self.tts.stream(result.get("current_question", "")):
-                    events.append(VoiceServerEvent(type="tts.audio", session_id=self.session_id, utterance_id=event.utterance_id, audio_base64=base64.b64encode(audio).decode("ascii")))
-                events.append(VoiceServerEvent(type="tts.completed", session_id=self.session_id, utterance_id=event.utterance_id))
-            except Exception:
-                events.append(self.error(VoiceErrorCode.TTS_ERROR, "Audio response is unavailable; use the displayed question."))
-        self.buffers.pop(event.utterance_id, None)
+                    async for audio in self.tts.stream(result.get("current_question", "")):
+                        events.append(VoiceServerEvent(type="tts.audio", session_id=self.session_id, utterance_id=event.utterance_id, audio_base64=base64.b64encode(audio).decode("ascii")))
+                    events.append(VoiceServerEvent(type="tts.completed", session_id=self.session_id, utterance_id=event.utterance_id))
+                except Exception as exc:
+                    logger.exception("TTS failed")
+                    events.append(self.error(VoiceErrorCode.TTS_ERROR, "Audio response is unavailable; use the displayed question."))
+        except Exception as exc:
+            from voice.real_providers import STTProviderError
+            logger.exception("STT error")
+            if isinstance(exc, STTProviderError):
+                code_map = {
+                    "STT_AUTH_ERROR": VoiceErrorCode.STT_AUTH_ERROR,
+                    "STT_TIMEOUT": VoiceErrorCode.STT_TIMEOUT,
+                    "STT_RATE_LIMITED": VoiceErrorCode.STT_RATE_LIMITED,
+                }
+                error_code = code_map.get(exc.code, VoiceErrorCode.STT_ERROR)
+                return [self.error(error_code, exc.message)]
+            return [self.error(VoiceErrorCode.STT_ERROR, "STT processing failed")]
+        finally:
+            self.buffers.pop(event.utterance_id, None)
+        
         return events
 
     @staticmethod
