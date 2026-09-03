@@ -436,7 +436,7 @@ We welcome contributions! Please see [CONTRIBUTING.md](CONTRIBUTING.md)
 
 ## 📄 License
 
-MIT License - see [LICENSE](LICENSE)
+License - see [LICENSE](LICENSE)
 
 ---
 
