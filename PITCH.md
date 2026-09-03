@@ -326,9 +326,8 @@
 
 ## 📞 Contact
 
-- **Founder**: [Your Name]
-- **Email**: [your email]
-- **Website**: [ai-interviewer.com]
+- **Founder**: Nguyen Minh Tri
+- **Email**: tringuyen.01012002@gmail.com
 
 ---
 
