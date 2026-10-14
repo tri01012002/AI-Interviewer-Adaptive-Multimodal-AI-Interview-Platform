@@ -210,3 +210,5 @@ htmlcov/
 # Misc
 *.patch
 *.orig
+
+.PROGRESS-TRACKER.md

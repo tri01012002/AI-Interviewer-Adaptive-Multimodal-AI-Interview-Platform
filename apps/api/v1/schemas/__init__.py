@@ -1,0 +1,1 @@
+"""API schemas shared by versioned routes."""
