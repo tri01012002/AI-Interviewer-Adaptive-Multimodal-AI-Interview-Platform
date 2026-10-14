@@ -240,6 +240,9 @@ class LLMEvaluator:
 
     def __init__(self, provider: LLMProvider) -> None:
         self.provider = provider
+        if provider.provider_name == "mock":
+            self.evaluator_type = "mock"
+            self.evaluator_version = "offline-fixture-v1"
 
     def evaluate(
         self,

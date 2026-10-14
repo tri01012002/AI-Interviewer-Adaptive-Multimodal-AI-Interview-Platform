@@ -2,9 +2,11 @@ import json
 from uuid import uuid4
 
 import pytest
+from fastapi.testclient import TestClient
 from sqlalchemy import func, select
 
 from agents.interview_agent.graph import AnswerAnalysis, InterviewAgentCore
+from apps.api.main import app
 from evaluation.service import (
     AssessmentStatus,
     EvaluationContext,
@@ -15,7 +17,6 @@ from evaluation.service import (
     SuggestedNextAction,
 )
 from integrations.llm_providers.provider import LLMInvalidOutputError, LLMTimeoutError
-from services.candidate_store import CandidateStore
 from services.database import (
     Base,
     InterviewAssessmentRecord,
@@ -27,7 +28,10 @@ from services.database import (
 )
 from services.interview_service import InterviewEvaluationError, InterviewService
 from services.turn_state import TurnStatus
-from services.user_store import UserStore
+from tests.unit.tenant_test_utils import (
+    create_candidate_through_invitation,
+    create_tenant,
+)
 
 RICH_ANSWER = "I implemented the API and reduced p99 latency by 40%."
 
@@ -197,12 +201,16 @@ def test_invalid_structured_output_is_rejected_and_not_scored():
 
 def test_provider_timeout_leaves_turn_retryable_and_success_is_idempotently_persisted():
     Base.metadata.create_all(bind=engine)
-    owner = UserStore.create(f"semantic-eval-{uuid4()}@example.com", "secret123", role="candidate")
-    candidate = CandidateStore.create(
-        {"name": "Semantic Evaluation Candidate", "email": owner["email"]},
-        owner["id"],
-        "candidate",
-    )
+    with TestClient(app) as client:
+        tenant = create_tenant(client)
+        owner, _headers, profile, _invitation = (
+            create_candidate_through_invitation(
+                client,
+                tenant,
+                email=f"semantic-eval-{uuid4()}@example.com",
+                name="Semantic Evaluation Candidate",
+            )
+        )
     calls = 0
 
     def respond(payload):
@@ -223,15 +231,23 @@ def test_provider_timeout_leaves_turn_retryable_and_success_is_idempotently_pers
     )
     service = InterviewService(agent=agent, evaluator=evaluator)
     state = service.start_interview(
-        candidate["id"],
+        profile["candidate_id"],
         "Backend Engineer",
         owner_user_id=owner["id"],
         owner_role="candidate",
+        organization_id=tenant.organization_id,
     )
     turn_id = f"semantic-turn-{uuid4()}"
 
     with pytest.raises(InterviewEvaluationError, match="evaluation is unavailable"):
-        service.submit_answer(state["interview_id"], RICH_ANSWER, turn_id, owner["id"], "candidate")
+        service.submit_answer(
+            state["interview_id"],
+            RICH_ANSWER,
+            turn_id,
+            owner["id"],
+            "candidate",
+            tenant.organization_id,
+        )
 
     with SessionLocal() as session:
         turn = session.execute(
@@ -240,10 +256,20 @@ def test_provider_timeout_leaves_turn_retryable_and_success_is_idempotently_pers
         assert turn.status == TurnStatus.FAILED_RETRYABLE
 
     completed = service.submit_answer(
-        state["interview_id"], RICH_ANSWER, turn_id, owner["id"], "candidate"
+        state["interview_id"],
+        RICH_ANSWER,
+        turn_id,
+        owner["id"],
+        "candidate",
+        tenant.organization_id,
     )
     replayed = service.submit_answer(
-        state["interview_id"], RICH_ANSWER, turn_id, owner["id"], "candidate"
+        state["interview_id"],
+        RICH_ANSWER,
+        turn_id,
+        owner["id"],
+        "candidate",
+        tenant.organization_id,
     )
 
     with SessionLocal() as session:

@@ -26,6 +26,7 @@ def _filters(payload: dict[str, str]) -> RetrievalFilters:
         job_id=payload.get("job_id"),
         difficulty=payload.get("difficulty"),
         source_type=payload.get("document_type"),
+        include_global=True,
     )
 
 

@@ -4,7 +4,10 @@ import httpx
 import pytest
 
 from agents.interview_agent.graph import AnswerAnalysis, InterviewAgentCore, QuestionProposal
+from evaluation.service import LLMEvaluator, Rubric
 from integrations.llm_providers.provider import (
+    DeterministicMockProvider,
+    LLMConfigurationError,
     LLMInvalidOutputError,
     LLMTimeoutError,
     OpenAIProvider,
@@ -91,6 +94,52 @@ def test_provider_factory_requires_explicit_provider_and_key():
     assert provider_from_settings(Settings()) is None
 
 
+def test_provider_factory_rejects_explicit_openai_without_credentials():
+    class Settings:
+        LLM_PROVIDER = "openai"
+        OPENAI_API_KEY = " "
+
+    with pytest.raises(LLMConfigurationError, match="requires OPENAI_API_KEY"):
+        provider_from_settings(Settings())
+
+
+def test_provider_factory_rejects_unknown_provider():
+    class Settings:
+        LLM_PROVIDER = "deepseek"
+        OPENAI_API_KEY = ""
+
+    with pytest.raises(LLMConfigurationError, match="Unsupported LLM_PROVIDER"):
+        provider_from_settings(Settings())
+
+
+def test_deterministic_mock_outputs_are_labeled_and_reproducible():
+    class Settings:
+        LLM_PROVIDER = "mock"
+        OPENAI_API_KEY = ""
+
+    provider = provider_from_settings(Settings())
+    assert isinstance(provider, DeterministicMockProvider)
+    agent = InterviewAgentCore(llm_provider=provider)
+    initial_state = agent.start_interview("candidate", "AI Engineer")
+    result = agent.handle_answer(initial_state, "I used Python to build a service.")
+    repeated = agent.handle_answer(initial_state, "I used Python to build a service.")
+    evaluation = LLMEvaluator(provider).evaluate(
+        "Describe your work.",
+        "I used Python to build a service.",
+        "python",
+        Rubric(competency="python"),
+    )
+
+    assert initial_state["question_source"] == "deterministic"
+    assert result["question_source"] == "mock"
+    assert result["current_question"].startswith("[MOCK QUESTION - NOT AI-GENERATED]")
+    assert repeated["current_question"] == result["current_question"]
+    assert evaluation.assessment.evaluator_type == "mock"
+    assert evaluation.assessment.evaluator_version == "offline-fixture-v1"
+    assert evaluation.assessment.score == 0
+    assert "not a candidate assessment" in evaluation.assessment.rationale
+
+
 def test_graph_uses_fake_provider_for_answer_and_question_with_untrusted_boundaries():
     fake = FakeProvider()
     agent = InterviewAgentCore(
@@ -104,4 +153,5 @@ def test_graph_uses_fake_provider_for_answer_and_question_with_untrusted_boundar
     assert "UNTRUSTED_CANDIDATE_CONTENT" in fake.calls[0][1]
     assert "UNTRUSTED_RETRIEVED_CONTEXT" in fake.calls[1][1]
     assert "Ignore previous instructions" in fake.calls[0][1]
+    assert result["question_source"] == "fake"
     assert "provider" not in result["errors"]

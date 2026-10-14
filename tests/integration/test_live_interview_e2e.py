@@ -174,7 +174,14 @@ def _index_corpus_and_retrieve(
     indexed = _bounded_call(
         deadline,
         "demo corpus ingestion",
-        lambda: store.upsert(documents, provider, replace_source=True),
+        lambda: store.upsert(
+            documents,
+            provider,
+            replace_source=True,
+            global_approval_reference=(
+                "repository:rag/corpus/demo_v1.json#demo-v1"
+            ),
+        ),
     )
     if indexed != len(documents):
         pytest.fail("Demo corpus ingestion did not persist semantic vectors for every chunk.")
@@ -198,15 +205,16 @@ def _index_corpus_and_retrieve(
 
 def _create_interview(
     run_id: str, provider: Any, monkeypatch: pytest.MonkeyPatch
-) -> tuple[Any, dict[str, str], dict[str, str], str, str, Any]:
+) -> tuple[Any, dict[str, str], dict[str, str], str, str, Any, str]:
     from sqlalchemy import select
 
     import services.interview_service as interview_service_module
-    from services.candidate_store import CandidateStore
     from services.database import (
         CandidateRecord,
         InterviewQuestionRecord,
         InterviewRecord,
+        OrganizationMembershipRecord,
+        OrganizationRecord,
         SessionLocal,
     )
     from services.interview_service import InterviewService
@@ -216,19 +224,39 @@ def _create_interview(
     candidate_email = f"live-candidate-{run_id}@example.invalid"
     recruiter = UserStore.create(recruiter_email, uuid4().hex, role="recruiter")
     candidate_user = UserStore.create(candidate_email, uuid4().hex, role="candidate")
-    candidate = CandidateStore.create(
-        {
-            "name": "Synthetic Demo Candidate",
-            "email": candidate_email,
-        },
-        recruiter["id"],
-        "recruiter",
-    )
+    organization_id = str(uuid4())
+    candidate_id = str(uuid4())
     with SessionLocal.begin() as session:
-        candidate_record = session.get(CandidateRecord, candidate["id"])
-        if candidate_record is None:
-            pytest.fail("Synthetic candidate profile was not persisted.")
-        candidate_record.user_id = candidate_user["id"]
+        session.add(
+            OrganizationRecord(
+                id=organization_id,
+                name=f"Synthetic live organization {run_id}",
+                created_by_user_id=recruiter["id"],
+            )
+        )
+        session.flush()
+        session.add_all(
+            [
+                OrganizationMembershipRecord(
+                    organization_id=organization_id,
+                    user_id=recruiter["id"],
+                    role="recruiter",
+                ),
+                OrganizationMembershipRecord(
+                    organization_id=organization_id,
+                    user_id=candidate_user["id"],
+                    role="candidate",
+                ),
+                CandidateRecord(
+                    id=candidate_id,
+                    name="Synthetic Demo Candidate",
+                    email=candidate_email,
+                    organization_id=organization_id,
+                    owner_user_id=recruiter["id"],
+                    user_id=candidate_user["id"],
+                ),
+            ]
+        )
 
     tracking_provider = _TrackingProvider(provider)
     monkeypatch.setattr(
@@ -239,10 +267,11 @@ def _create_interview(
 
     service = InterviewService(redis_client=_MemoryRedis())
     state = service.start_interview(
-        candidate["id"],
+        candidate_id,
         "AI Engineer",
         owner_user_id=recruiter["id"],
         owner_role="recruiter",
+        organization_id=organization_id,
     )
     interview_id = state["interview_id"]
 
@@ -269,6 +298,7 @@ def _create_interview(
         interview_id,
         state["current_question"],
         tracking_provider,
+        organization_id,
     )
 
 
@@ -280,6 +310,7 @@ def _submit_two_answers(
     tracking_provider: Any,
     run_id: str,
     deadline: float,
+    organization_id: str,
 ) -> None:
     answers = (
         "I built a Python service that used asyncio to keep outbound requests responsive, "
@@ -299,6 +330,7 @@ def _submit_two_answers(
                 f"live-turn-{run_id}-{index}",
                 candidate["id"],
                 "candidate",
+                organization_id,
             ),
         )
         replay = _bounded_call(
@@ -310,6 +342,7 @@ def _submit_two_answers(
                 f"live-turn-{run_id}-{index}",
                 candidate["id"],
                 "candidate",
+                organization_id,
             ),
         )
         if replay.get("history") != state.get("history"):
@@ -323,6 +356,7 @@ def _submit_two_answers(
                 f"live-turn-{run_id}-{index}",
                 candidate["id"],
                 "candidate",
+                organization_id,
             )
         if state.get("evaluation", {}).get("evaluator_type") != "llm":
             pytest.fail(f"Answer {index} was not evaluated by the configured live LLM.")
@@ -351,12 +385,14 @@ def _assert_resource_access(
     interview_id: str,
     recruiter_email: str,
     candidate_email: str,
+    organization_id: str,
 ) -> dict[str, Any]:
     from fastapi.testclient import TestClient
 
     from apps.api import main as api_main
     from apps.api.main import app
     from services.auth_service import issue_token
+    from services.database import OrganizationMembershipRecord, SessionLocal
     from services.report_service import ReportService
     from services.user_store import UserStore
 
@@ -379,7 +415,7 @@ def _assert_resource_access(
     outsider_recruiter = UserStore.create(
         f"outsider-recruiter-{uuid4().hex}@example.invalid",
         uuid4().hex,
-        role="recruiter",
+        role="candidate",
     )
     outsider_candidate = UserStore.create(
         f"outsider-candidate-{uuid4().hex}@example.invalid",
@@ -388,10 +424,31 @@ def _assert_resource_access(
     )
     outsider_recruiter_token = issue_token(outsider_recruiter["email"], role="recruiter")
     outsider_candidate_token = issue_token(outsider_candidate["email"], role="candidate")
+    with SessionLocal.begin() as session:
+        session.add_all(
+            [
+                OrganizationMembershipRecord(
+                    organization_id=organization_id,
+                    user_id=outsider_recruiter["id"],
+                    role="recruiter",
+                ),
+                OrganizationMembershipRecord(
+                    organization_id=organization_id,
+                    user_id=outsider_candidate["id"],
+                    role="candidate",
+                ),
+            ]
+        )
+
+    def scoped_headers(token: str) -> dict[str, str]:
+        return {
+            "Authorization": "Bearer " + token,
+            "X-Organization-ID": organization_id,
+        }
 
     with TestClient(app) as client:
-        recruiter_headers = {"Authorization": "Bearer " + recruiter_token}
-        candidate_headers = {"Authorization": "Bearer " + candidate_token}
+        recruiter_headers = scoped_headers(recruiter_token)
+        candidate_headers = scoped_headers(candidate_token)
         assert client.get(
             f"/api/v1/interview/{interview_id}", headers=candidate_headers
         ).status_code == 200
@@ -404,19 +461,19 @@ def _assert_resource_access(
         for response in (
             client.get(
                 f"/api/v1/interview/{interview_id}",
-                headers={"Authorization": "Bearer " + outsider_recruiter_token},
+                headers=scoped_headers(outsider_recruiter_token),
             ),
             client.get(
                 f"/api/v1/interview/{interview_id}",
-                headers={"Authorization": "Bearer " + outsider_candidate_token},
+                headers=scoped_headers(outsider_candidate_token),
             ),
             client.post(
                 f"/api/v1/interview/{interview_id}/report",
-                headers={"Authorization": "Bearer " + outsider_recruiter_token},
+                headers=scoped_headers(outsider_recruiter_token),
             ),
             client.post(
                 f"/api/v1/interview/{interview_id}/report?format=txt",
-                headers={"Authorization": "Bearer " + outsider_recruiter_token},
+                headers=scoped_headers(outsider_recruiter_token),
             ),
         ):
             assert response.status_code == 404
@@ -517,6 +574,7 @@ def test_live_interview_reaches_report_api_with_persisted_ai_results(monkeypatch
         interview_id,
         initial_question,
         tracking_provider,
+        organization_id,
     ) = _create_interview(run_id, provider, monkeypatch)
     _submit_two_answers(
         service,
@@ -526,6 +584,7 @@ def test_live_interview_reaches_report_api_with_persisted_ai_results(monkeypatch
         tracking_provider,
         run_id,
         deadline,
+        organization_id,
     )
     report = _bounded_call(
         deadline,
@@ -536,6 +595,7 @@ def test_live_interview_reaches_report_api_with_persisted_ai_results(monkeypatch
             interview_id,
             recruiter["email"],
             candidate["email"],
+            organization_id,
         ),
     )
     report = _bounded_call(
