@@ -10,11 +10,15 @@ class FakeInterviewService:
     def __init__(self):
         self.calls = []
 
-    def get_interview(self, interview_id, user_id, role):
+    def get_interview(self, interview_id, user_id, role, organization_id=None):
         return {"interview_id": interview_id, "current_question": "Initial question"}
 
-    def submit_answer(self, interview_id, answer, turn_id, user_id, role):
-        self.calls.append((interview_id, answer, turn_id, user_id, role))
+    def submit_answer(
+        self, interview_id, answer, turn_id, user_id, role, organization_id=None
+    ):
+        self.calls.append(
+            (interview_id, answer, turn_id, user_id, role, organization_id)
+        )
         return {"current_question": "How did you measure the result?"}
 
 

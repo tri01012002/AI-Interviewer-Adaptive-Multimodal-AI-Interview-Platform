@@ -10,11 +10,18 @@ import re
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from time import perf_counter
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
 from rank_bm25 import BM25Okapi
 
 from config import settings
+
+DEMO_CORPUS_GLOBAL_APPROVAL_REFERENCE = (
+    "repository:rag/corpus/demo_v1.json#demo-v1"
+)
+
+
+CorpusScope = Literal["organization", "global", "unclassified"]
 
 
 @dataclass(frozen=True)
@@ -33,6 +40,31 @@ class DocumentChunk:
     organization_id: str | None = None
     source: str = "demo-corpus"
     active: bool = True
+    scope: CorpusScope = "unclassified"
+    scope_approval_reference: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.scope == "organization":
+            if (
+                not isinstance(self.organization_id, str)
+                or not self.organization_id.strip()
+            ):
+                raise ValueError("organization-scoped corpus chunks require an organization")
+            if self.scope_approval_reference is not None:
+                raise ValueError("organization-scoped corpus chunks cannot use global approval")
+        elif self.scope == "global":
+            if self.organization_id is not None:
+                raise ValueError("global corpus chunks cannot belong to an organization")
+            if (
+                not isinstance(self.scope_approval_reference, str)
+                or not self.scope_approval_reference.strip()
+            ):
+                raise ValueError("global corpus chunks require an approval reference")
+        elif self.scope == "unclassified":
+            if self.scope_approval_reference is not None:
+                raise ValueError("unclassified corpus chunks cannot carry an approved scope")
+        else:
+            raise ValueError("invalid corpus scope")
 
 
 @dataclass(frozen=True)
@@ -45,6 +77,7 @@ class RetrievalFilters:
     difficulty: str | None = None
     job_id: str | None = None
     organization_id: str | None = None
+    include_global: bool = False
     active: bool = True
 
 
@@ -104,7 +137,7 @@ class OpenAIEmbeddingProvider:
     """OpenAI text embeddings with bounded network timeout and strict vector checks."""
 
     def __init__(self, client: Any | None = None) -> None:
-        if not settings.OPENAI_API_KEY and client is None:
+        if not settings.OPENAI_API_KEY.strip() and client is None:
             raise EmbeddingProviderError("OpenAI embedding credentials are not configured")
         if settings.EMBEDDING_PROVIDER.lower() != "openai":
             raise EmbeddingProviderError("configured embedding provider is not OpenAI")
@@ -143,9 +176,11 @@ def configured_embedding_provider() -> EmbeddingProvider | None:
         return None
     if provider_name != "openai":
         raise EmbeddingProviderError(f"unsupported embedding provider: {provider_name}")
-    if settings.OPENAI_API_KEY:
-        return OpenAIEmbeddingProvider()
-    return None
+    if not settings.OPENAI_API_KEY.strip():
+        raise EmbeddingProviderError(
+            "EMBEDDING_PROVIDER=openai requires OPENAI_API_KEY"
+        )
+    return OpenAIEmbeddingProvider()
 
 
 class DenseRetriever:
@@ -219,6 +254,51 @@ class DeterministicReranker:
         return sorted(rescored, key=lambda item: item.score, reverse=True)[:top_k]
 
 
+def _validate_corpus_ingestion_scope(
+    documents: list[DocumentChunk],
+    global_approval_reference: str | None,
+) -> None:
+    if any(
+        document.scope == "unclassified"
+        and document.organization_id is not None
+        for document in documents
+    ):
+        raise ValueError(
+            "unclassified corpus chunks cannot be ingested with an organization hint"
+        )
+
+    has_global_documents = any(document.scope == "global" for document in documents)
+    if not has_global_documents:
+        if global_approval_reference is not None:
+            raise ValueError(
+                "global corpus approval reference supplied without global documents"
+            )
+        return
+
+    if (
+        not isinstance(global_approval_reference, str)
+        or not global_approval_reference.strip()
+    ):
+        raise ValueError("global corpus ingestion requires an approval reference")
+    if global_approval_reference != DEMO_CORPUS_GLOBAL_APPROVAL_REFERENCE:
+        raise ValueError(
+            "global ingestion is restricted to the pinned repository demo corpus"
+        )
+    if any(
+        document.scope == "global"
+        and document.scope_approval_reference != global_approval_reference
+        for document in documents
+    ):
+        raise ValueError("global corpus approval reference does not match its documents")
+
+    from rag.corpus_loader import load_demo_corpus
+
+    if documents != load_demo_corpus():
+        raise ValueError(
+            "global ingestion must use the exact pinned repository demo corpus"
+        )
+
+
 class SQLAlchemyVectorStore:
     """Portable durable vectors with exact cosine scan for the small MVP corpus."""
 
@@ -243,21 +323,42 @@ class SQLAlchemyVectorStore:
         embedding_provider: EmbeddingProvider | None,
         *,
         replace_source: bool = False,
+        global_approval_reference: str | None = None,
     ) -> int:
         from services.database import RAGDocumentRecord
+
+        _validate_corpus_ingestion_scope(documents, global_approval_reference)
 
         indexed = 0
         now = datetime.now(UTC)
         with self._session_factory.begin() as session:
             if replace_source:
-                sources = {document.source for document in documents}
-                session.query(RAGDocumentRecord).filter(
-                    RAGDocumentRecord.source.in_(sources)
-                ).update({"active": False}, synchronize_session=False)
+                source_scopes = {
+                    (document.scope, document.organization_id, document.source)
+                    for document in documents
+                }
+                for scope, organization_id, source in source_scopes:
+                    replacement_query = session.query(RAGDocumentRecord).filter(
+                        RAGDocumentRecord.scope == scope,
+                        RAGDocumentRecord.source == source,
+                    )
+                    if organization_id is None:
+                        replacement_query = replacement_query.filter(
+                            RAGDocumentRecord.organization_id.is_(None)
+                        )
+                    else:
+                        replacement_query = replacement_query.filter(
+                            RAGDocumentRecord.organization_id == organization_id
+                        )
+                    replacement_query.update(
+                        {"active": False}, synchronize_session=False
+                    )
             for document in documents:
                 existing = (
                     session.query(RAGDocumentRecord)
                     .filter_by(
+                        scope=document.scope,
+                        organization_id=document.organization_id,
                         document_id=document.document_id,
                         chunk_id=document.chunk_id,
                         version=document.version,
@@ -302,6 +403,12 @@ class SQLAlchemyVectorStore:
                     "competency_id": document.competency,
                     "job_id": document.job_id or _scope_id(document.job_role) or None,
                     "organization_id": document.organization_id,
+                    "scope": document.scope,
+                    "scope_approval_reference": (
+                        global_approval_reference
+                        if document.scope == "global"
+                        else None
+                    ),
                     "difficulty": document.difficulty,
                     "source": document.source,
                     "active": document.active,
@@ -394,12 +501,30 @@ class SQLAlchemyVectorStore:
         else:
             query = query.filter((model.job_id == job_id) | model.job_id.is_(None))
         if filters.organization_id is None:
-            query = query.filter(model.organization_id.is_(None))
+            if filters.include_global:
+                query = query.filter(
+                    model.scope == "global",
+                    model.organization_id.is_(None),
+                    model.scope_approval_reference
+                    == DEMO_CORPUS_GLOBAL_APPROVAL_REFERENCE,
+                )
+            else:
+                query = query.filter(False)
         else:
-            query = query.filter(
-                (model.organization_id == filters.organization_id)
-                | model.organization_id.is_(None)
+            scope_filter = (
+                (model.scope == "organization")
+                & (model.organization_id == filters.organization_id)
             )
+            if filters.include_global:
+                scope_filter = scope_filter | (
+                    (model.scope == "global")
+                    & model.organization_id.is_(None)
+                    & (
+                        model.scope_approval_reference
+                        == DEMO_CORPUS_GLOBAL_APPROVAL_REFERENCE
+                    )
+                )
+            query = query.filter(scope_filter)
         return query
 
     @staticmethod
@@ -417,6 +542,8 @@ class SQLAlchemyVectorStore:
             difficulty=row.difficulty,
             job_id=row.job_id,
             organization_id=row.organization_id,
+            scope=row.scope,
+            scope_approval_reference=row.scope_approval_reference,
             source=row.source,
             active=row.active,
         )
@@ -466,14 +593,14 @@ class HybridRetriever:
         lexical_results = self.lexical.retrieve(query, documents, active_filters, top_k)
         if not documents:
             fallback_reason = "empty_filtered_corpus"
-        candidates: dict[str, RetrievedChunk] = {}
+        candidates: dict[tuple[CorpusScope, str | None, str, str], RetrievedChunk] = {}
         for rank, candidate in enumerate(dense_results, start=1):
-            identity = f"{candidate.chunk.document_id}:{candidate.chunk.chunk_id}"
+            identity = _chunk_identity(candidate.chunk)
             candidates[identity] = RetrievedChunk(
                 candidate.chunk, 1 / (60 + rank), candidate.dense_score, candidate.lexical_score, rank
             )
         for rank, candidate in enumerate(lexical_results, start=1):
-            identity = f"{candidate.chunk.document_id}:{candidate.chunk.chunk_id}"
+            identity = _chunk_identity(candidate.chunk)
             previous = candidates.get(identity)
             rrf_score = 1 / (60 + rank)
             candidates[identity] = RetrievedChunk(
@@ -581,6 +708,7 @@ class RAGQuestionService:
                     job_id=scope_id or None,
                     organization_id=organization_id,
                     difficulty=difficulty,
+                    include_global=True,
                 ),
                 top_k=self.max_chunks,
             )
@@ -623,6 +751,7 @@ class RAGQuestionService:
                     competency=competency,
                     job_id=_scope_id(position) or None,
                     source_type="interview_question",
+                    include_global=True,
                 ),
                 top_k=4,
             )
@@ -687,9 +816,13 @@ def _matches(document: DocumentChunk, filters: RetrievalFilters) -> bool:
     if filters.difficulty is not None and document.difficulty not in (None, filters.difficulty):
         return False
     if filters.organization_id is None:
-        if document.organization_id is not None:
+        if not filters.include_global or not _is_verified_global(document):
             return False
-    elif document.organization_id not in (None, filters.organization_id):
+    elif not (
+        document.scope == "organization"
+        and document.organization_id == filters.organization_id
+        or (filters.include_global and _is_verified_global(document))
+    ):
         return False
     return all(
         expected is None or actual == expected
@@ -699,6 +832,26 @@ def _matches(document: DocumentChunk, filters: RetrievalFilters) -> bool:
             (document.version, filters.version),
             (document.language, filters.language),
         )
+    )
+
+
+def _is_verified_global(document: DocumentChunk) -> bool:
+    return (
+        document.scope == "global"
+        and document.organization_id is None
+        and document.scope_approval_reference
+        == DEMO_CORPUS_GLOBAL_APPROVAL_REFERENCE
+    )
+
+
+def _chunk_identity(
+    document: DocumentChunk,
+) -> tuple[CorpusScope, str | None, str, str]:
+    return (
+        document.scope,
+        document.organization_id,
+        document.document_id,
+        document.chunk_id,
     )
 
 

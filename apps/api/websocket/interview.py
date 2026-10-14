@@ -4,38 +4,24 @@ from __future__ import annotations
 
 import json
 from typing import Any
+from uuid import uuid4
 
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
 
 from apps.api.v1.routes.interview import service as interview_service
 from config import settings
 from services.auth_service import decode_token
+from services.support_access_audit import (
+    MandatoryAuditUnavailable,
+    persist_required_audit,
+)
+from services.tenant_authorization import TenantContext, resolve_tenant_context
 from services.user_store import UserStore
 from voice.contracts import ClientVoiceEvent, VoiceErrorCode, VoiceServerEvent
 from voice.factory import create_providers
 from voice.session import VoiceSessionService
 
 router = APIRouter()
-
-
-class ConnectionManager:
-    def __init__(self) -> None:
-        self.active_connections: dict[str, WebSocket] = {}
-
-    async def connect(self, websocket: WebSocket, interview_id: str) -> None:
-        await websocket.accept()
-        self.active_connections[interview_id] = websocket
-
-    def disconnect(self, interview_id: str) -> None:
-        self.active_connections.pop(interview_id, None)
-
-    async def send_event(self, interview_id: str, event: dict[str, Any]) -> None:
-        socket = self.active_connections.get(interview_id)
-        if socket is not None:
-            await socket.send_text(json.dumps(event))
-
-
-manager = ConnectionManager()
 
 
 @router.websocket("/ws/interview/{interview_id}")
@@ -48,23 +34,41 @@ async def interview_socket(websocket: WebSocket, interview_id: str) -> None:
         claims = decode_token(token)
         user = UserStore.get_by_email(str(claims.get("sub", "")))
         if user is None:
-            raise ValueError("user not found")
-    except Exception:
+            await websocket.close(code=4401, reason="Authentication failed")
+            return
+    except HTTPException:
         await websocket.close(code=4401, reason="Authentication failed")
         return
-    state = interview_service.get_interview(interview_id, user["id"], user["role"])
+
+    context = await _authorize_websocket(websocket, interview_id, user)
+    if context is None:
+        return
+    if context.is_platform_admin and not _audit_websocket_support(context, interview_id):
+        await websocket.close(code=4503, reason="Required access audit unavailable")
+        return
+    state = interview_service.get_interview(
+        interview_id,
+        context.actor_user_id,
+        context.role,
+        context.organization_id,
+    )
     if state is None:
         await websocket.close(code=4403, reason="Interview is not available")
         return
-    await manager.connect(websocket, interview_id)
     try:
         await websocket.send_text(json.dumps({"type": "connected", "interview_id": interview_id, "status": "ready"}))
         while True:
             payload = await websocket.receive_text()
-            data = json.loads(payload)
-            await manager.send_event(interview_id, {"type": "message", "payload": data})
+            try:
+                data = json.loads(payload)
+            except json.JSONDecodeError:
+                await websocket.close(code=4400, reason="Invalid message")
+                return
+            await websocket.send_text(
+                json.dumps({"type": "message", "payload": data})
+            )
     except WebSocketDisconnect:
-        manager.disconnect(interview_id)
+        return
 
 
 @router.websocket("/ws/interview/{interview_id}/voice")
@@ -81,16 +85,27 @@ async def voice_interview_socket(websocket: WebSocket, interview_id: str) -> Non
         claims = decode_token(token)
         user = UserStore.get_by_email(str(claims.get("sub", "")))
         if user is None:
-            raise ValueError("user not found")
-        state = interview_service.get_interview(interview_id, user["id"], user["role"])
-        if state is None:
-            await websocket.close(code=4403, reason="Interview is not available")
+            await websocket.close(code=4401, reason="Authentication failed")
             return
-    except Exception:
+    except HTTPException:
         await websocket.close(code=4401, reason="Authentication failed")
         return
 
-    await websocket.accept()
+    context = await _authorize_websocket(websocket, interview_id, user)
+    if context is None:
+        return
+    if context.is_platform_admin and not _audit_websocket_support(context, interview_id):
+        await websocket.close(code=4503, reason="Required access audit unavailable")
+        return
+    state = interview_service.get_interview(
+        interview_id,
+        context.actor_user_id,
+        context.role,
+        context.organization_id,
+    )
+    if state is None:
+        await websocket.close(code=4403, reason="Interview is not available")
+        return
 
     # Create providers based on configuration
     vad, stt, tts = create_providers()
@@ -98,7 +113,8 @@ async def voice_interview_socket(websocket: WebSocket, interview_id: str) -> Non
     session = VoiceSessionService(
         interview_service,
         user["id"],
-        user["role"],
+        context.role,
+        context.organization_id,
         vad=vad,
         stt=stt,
         tts=tts,
@@ -164,3 +180,130 @@ async def voice_interview_socket(websocket: WebSocket, interview_id: str) -> Non
             pass
     finally:
         await session.close()
+
+
+async def _authorize_websocket(
+    websocket: WebSocket,
+    interview_id: str,
+    user: dict[str, Any],
+) -> TenantContext | None:
+    await websocket.accept()
+    try:
+        authorization_text = await websocket.receive_text()
+    except WebSocketDisconnect:
+        return None
+    if len(authorization_text) > 4096:
+        if await _audit_denied_support(websocket, user, interview_id):
+            return None
+        await websocket.close(code=4400, reason="Authorization frame is too large")
+        return None
+    try:
+        authorization_frame = json.loads(authorization_text)
+    except json.JSONDecodeError:
+        if await _audit_denied_support(websocket, user, interview_id):
+            return None
+        await websocket.close(code=4403, reason="Organization authorization required")
+        return None
+    if (
+        not isinstance(authorization_frame, dict)
+        or authorization_frame.get("type") != "authorize"
+        or (
+            authorization_frame.get("organization_id") is not None
+            and not isinstance(authorization_frame.get("organization_id"), str)
+        )
+        or (
+            authorization_frame.get("support_reason") is not None
+            and not isinstance(authorization_frame.get("support_reason"), str)
+        )
+    ):
+        if await _audit_denied_support(
+            websocket, user, interview_id, authorization_frame
+        ):
+            return None
+        await websocket.close(code=4403, reason="Organization authorization required")
+        return None
+
+    organization_id = authorization_frame.get("organization_id")
+    support_reason = authorization_frame.get("support_reason")
+    try:
+        return resolve_tenant_context(user, organization_id, support_reason)
+    except HTTPException:
+        if await _audit_denied_support(
+            websocket, user, interview_id, authorization_frame
+        ):
+            return None
+        await websocket.close(code=4403, reason="Organization authorization failed")
+        return None
+
+
+async def _audit_denied_support(
+    websocket: WebSocket,
+    user: dict[str, Any],
+    interview_id: str,
+    authorization_frame: Any = None,
+) -> bool:
+    if user["role"] != "admin":
+        return False
+    organization_id = (
+        authorization_frame.get("organization_id")
+        if isinstance(authorization_frame, dict)
+        and isinstance(authorization_frame.get("organization_id"), str)
+        else None
+    )
+    support_reason = (
+        authorization_frame.get("support_reason")
+        if isinstance(authorization_frame, dict)
+        and isinstance(authorization_frame.get("support_reason"), str)
+        else None
+    )
+    if _audit_websocket_support_values(
+        user["id"],
+        organization_id,
+        support_reason,
+        interview_id,
+    ):
+        return False
+    await websocket.close(code=4503, reason="Required access audit unavailable")
+    return True
+
+
+def _audit_websocket_support(
+    context: TenantContext,
+    interview_id: str,
+) -> bool:
+    return _audit_websocket_support_values(
+        context.actor_user_id,
+        context.organization_id,
+        context.support_reason,
+        interview_id,
+    )
+
+
+def _audit_websocket_support_values(
+    actor_user_id: str,
+    requested_organization_id: str | None,
+    support_reason: str | None,
+    interview_id: str,
+) -> bool:
+    requested_organization_id = (
+        requested_organization_id
+        if requested_organization_id and len(requested_organization_id) <= 256
+        else None
+    )
+    reason = support_reason.strip() if support_reason else None
+    if reason and (len(reason) > 500 or "\r" in reason or "\n" in reason):
+        reason = None
+    try:
+        persist_required_audit(
+            request_id=str(uuid4()),
+            actor_user_id=actor_user_id,
+            organization_id=requested_organization_id,
+            requested_organization_id=requested_organization_id,
+            action="websocket_access_attempt",
+            resource_type="interview",
+            resource_id=interview_id[:128] or "unknown",
+            support_reason=reason,
+        )
+    except MandatoryAuditUnavailable:
+        return False
+    return True

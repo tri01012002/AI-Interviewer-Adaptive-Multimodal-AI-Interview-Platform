@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
 
+from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
 from agents.interview_agent.graph import InterviewAgentCore
@@ -26,7 +27,7 @@ from infrastructure.distributed_lock import (
 from infrastructure.redis_store import RedisClient, RedisStore
 from integrations.llm_providers.provider import LLMProviderError, provider_from_settings
 from rag.service import RAGQuestionService
-from services.database import AccessAuditRecord, SessionLocal
+from services.database import CandidateRecord, SessionLocal
 from services.repositories import (
     EvaluationRepository,
     InterviewRepository,
@@ -118,53 +119,103 @@ class InterviewService:
         mode: str = "text",
         owner_user_id: str | None = None,
         owner_role: str = "candidate",
+        organization_id: str | None = None,
     ) -> dict[str, Any]:
+        if not organization_id or owner_role in {"org_admin", "platform_admin"}:
+            raise InterviewNotFoundError(candidate_id)
         with SessionLocal() as session:
+            candidate = session.execute(
+                select(CandidateRecord).where(
+                    CandidateRecord.id == candidate_id,
+                    CandidateRecord.organization_id == organization_id,
+                )
+            ).scalar_one_or_none()
             if not self.interviews.can_manage_candidate(
-                session, candidate_id, owner_user_id or "", owner_role
-            ):
+                session, candidate_id, owner_user_id or "", owner_role, organization_id
+            ) or candidate is None:
                 raise InterviewNotFoundError(candidate_id)
         state = self.agent.start_interview(candidate_id=candidate_id, position=position)
         interview_id = str(uuid4())
         now = datetime.now(UTC).isoformat()
-        state.update({"interview_id": interview_id, "mode": mode, "created_at": now, "updated_at": now})
+        state.update({
+            "interview_id": interview_id,
+            "mode": mode,
+            "organization_id": organization_id,
+            "created_at": now,
+            "updated_at": now,
+        })
         with SessionLocal.begin() as session:
+            candidate = session.execute(
+                select(CandidateRecord).where(
+                    CandidateRecord.id == candidate_id,
+                    CandidateRecord.organization_id == organization_id,
+                )
+            ).scalar_one_or_none()
             if not self.interviews.can_manage_candidate(
-                session, candidate_id, owner_user_id or "", owner_role
-            ):
+                session, candidate_id, owner_user_id or "", owner_role, organization_id
+            ) or candidate is None:
                 raise InterviewNotFoundError(candidate_id)
-            self.interviews.create(session, state, owner_user_id)
-            if owner_role == "admin" and owner_user_id is not None:
-                self._audit_admin(session, owner_user_id, "create", interview_id)
+            self.interviews.create(
+                session, state, candidate.owner_user_id, organization_id
+            )
         return state
 
-    def get_interview(self, interview_id: str, user_id: str | None = None, role: str = "candidate") -> dict[str, Any] | None:
+    def get_interview(
+        self,
+        interview_id: str,
+        user_id: str | None = None,
+        role: str = "candidate",
+        organization_id: str | None = None,
+    ) -> dict[str, Any] | None:
+        if not organization_id:
+            return None
         with SessionLocal.begin() as session:
-            interview = self.interviews.get_authorized(session, interview_id, user_id or "", role)
+            interview = self.interviews.get_authorized(
+                session, interview_id, user_id or "", role, organization_id
+            )
             if interview is None:
                 return None
-            if role == "admin" and user_id is not None:
-                self._audit_admin(session, user_id, "read", interview_id)
             return self._state(interview)
 
-    def list_interviews(self, user_id: str | None = None, role: str = "candidate") -> list[dict[str, Any]]:
+    def list_interviews(
+        self,
+        user_id: str | None = None,
+        role: str = "candidate",
+        organization_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        if not organization_id:
+            return []
         with SessionLocal.begin() as session:
-            interviews = self.interviews.list_authorized(session, user_id or "", role)
-            if role == "admin" and user_id is not None:
-                self._audit_admin(session, user_id, "list", "collection")
+            interviews = self.interviews.list_authorized(
+                session, user_id or "", role, organization_id
+            )
             return [self._state(interview) for interview in interviews]
 
     def submit_answer(
-        self, interview_id: str, answer: str, turn_id: str, user_id: str | None = None, role: str = "candidate"
+        self,
+        interview_id: str,
+        answer: str,
+        turn_id: str,
+        user_id: str | None = None,
+        role: str = "candidate",
+        organization_id: str | None = None,
     ) -> dict[str, Any]:
-        if role == "recruiter":
-            raise InterviewForbiddenError("Recruiters have read-only interview access")
-        lock = self._acquire_submission_lock(interview_id, answer, turn_id, user_id, role)
+        if role in {"recruiter", "org_admin", "platform_admin"}:
+            raise InterviewForbiddenError("This organization membership has read-only interview access")
+        if not organization_id:
+            raise InterviewNotFoundError(interview_id)
+        lock = self._acquire_submission_lock(
+            interview_id, answer, turn_id, user_id, role, organization_id
+        )
         try:
-            replay = self._prepare_turn(interview_id, answer, turn_id, user_id, role)
+            replay = self._prepare_turn(
+                interview_id, answer, turn_id, user_id, role, organization_id
+            )
             if replay is not None:
                 return replay
-            return self._process_turn(interview_id, answer, turn_id, user_id, role)
+            return self._process_turn(
+                interview_id, answer, turn_id, user_id, role, organization_id
+            )
         finally:
             self._release_processing_lock(interview_id, lock)
 
@@ -175,9 +226,12 @@ class InterviewService:
         turn_id: str,
         user_id: str | None,
         role: str,
+        organization_id: str,
     ) -> DistributedLock:
         with SessionLocal() as session:
-            if self.interviews.get_authorized(session, interview_id, user_id or "", role) is None:
+            if self.interviews.get_authorized(
+                session, interview_id, user_id or "", role, organization_id
+            ) is None:
                 raise InterviewNotFoundError(interview_id)
         try:
             lock = self._get_processing_lock(interview_id)
@@ -208,14 +262,15 @@ class InterviewService:
         turn_id: str,
         user_id: str | None,
         role: str,
+        organization_id: str,
     ) -> dict[str, Any] | None:
         try:
             with SessionLocal.begin() as session:
-                interview = self.interviews.get_authorized(session, interview_id, user_id or "", role)
+                interview = self.interviews.get_authorized(
+                    session, interview_id, user_id or "", role, organization_id
+                )
                 if interview is None:
                     raise InterviewNotFoundError(interview_id)
-                if role == "admin" and user_id is not None:
-                    self._audit_admin(session, user_id, "answer", interview_id)
                 existing_turn = self.turns.get_by_client_id(session, interview_id, turn_id)
                 if existing_turn is not None:
                     if not self._claim_existing_turn(existing_turn, answer):
@@ -227,7 +282,9 @@ class InterviewService:
                     self.turns.create_processing(session, interview_id, turn_id, answer)
         except IntegrityError as exc:
             with SessionLocal() as session:
-                interview = self.interviews.get_authorized(session, interview_id, user_id or "", role)
+                interview = self.interviews.get_authorized(
+                    session, interview_id, user_id or "", role, organization_id
+                )
                 if interview is None:
                     raise InterviewNotFoundError(interview_id) from exc
                 existing_turn = self.turns.get_by_client_id(session, interview_id, turn_id)
@@ -265,10 +322,13 @@ class InterviewService:
         turn_id: str,
         user_id: str | None,
         role: str,
+        organization_id: str,
     ) -> dict[str, Any]:
         try:
             with SessionLocal.begin() as session:
-                interview = self.interviews.get_authorized(session, interview_id, user_id or "", role)
+                interview = self.interviews.get_authorized(
+                    session, interview_id, user_id or "", role, organization_id
+                )
                 if interview is None:
                     raise InterviewNotFoundError(interview_id)
                 persisted_turn = self.turns.get_by_client_id(session, interview_id, turn_id)
@@ -343,9 +403,17 @@ class InterviewService:
                 return updated_state
         except Exception:
             with SessionLocal.begin() as session:
-                failed_turn = self.turns.get_by_client_id(session, interview_id, turn_id)
-                if failed_turn is not None and failed_turn.status == TurnStatus.PROCESSING:
-                    self.turns.transition(failed_turn, TurnStatus.FAILED_RETRYABLE)
+                interview = self.interviews.get_authorized(
+                    session, interview_id, user_id or "", role, organization_id
+                )
+                if interview is not None:
+                    failed_turn = self.turns.get_by_client_id(
+                        session, interview_id, turn_id
+                    )
+                    if failed_turn is not None and failed_turn.status == TurnStatus.PROCESSING:
+                        self.turns.transition(
+                            failed_turn, TurnStatus.FAILED_RETRYABLE
+                        )
             raise
 
     def _retrieve_graph_context(self, state: dict[str, Any]) -> str:
@@ -370,17 +438,9 @@ class InterviewService:
         state.update({
             "interview_id": interview.id,
             "candidate_id": interview.candidate_id,
+            "organization_id": interview.organization_id,
             "position": interview.position,
             "mode": interview.mode,
             "current_question": interview.current_question,
         })
         return state
-
-    @staticmethod
-    def _audit_admin(session, user_id: str, action: str, resource_id: str) -> None:
-        session.add(AccessAuditRecord(
-            actor_user_id=user_id,
-            action=action,
-            resource_type="interview",
-            resource_id=resource_id,
-        ))

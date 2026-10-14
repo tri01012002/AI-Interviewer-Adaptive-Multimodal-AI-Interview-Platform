@@ -8,9 +8,11 @@ from pathlib import Path
 
 from sqlalchemy import (
     Boolean,
+    CheckConstraint,
     DateTime,
     Float,
     ForeignKey,
+    ForeignKeyConstraint,
     Index,
     Integer,
     String,
@@ -61,16 +63,66 @@ class UserRecord(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
 
+class OrganizationRecord(Base):
+    __tablename__ = "organizations"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    name: Mapped[str] = mapped_column(String, nullable=False)
+    status: Mapped[str] = mapped_column(String, nullable=False, default="active")
+    created_by_user_id: Mapped[str] = mapped_column(String, ForeignKey("users.id"), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC), nullable=False)
+
+    __table_args__ = (
+        CheckConstraint("status IN ('active', 'suspended')", name="ck_organizations_status"),
+    )
+
+
+class OrganizationMembershipRecord(Base):
+    __tablename__ = "organization_memberships"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    organization_id: Mapped[str] = mapped_column(String, ForeignKey("organizations.id"), nullable=False, index=True)
+    user_id: Mapped[str] = mapped_column(String, ForeignKey("users.id"), nullable=False, index=True)
+    role: Mapped[str] = mapped_column(String, nullable=False)
+    status: Mapped[str] = mapped_column(String, nullable=False, default="active")
+    granted_by_user_id: Mapped[str | None] = mapped_column(String, ForeignKey("users.id"), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC), nullable=False)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint("organization_id", "user_id", name="uq_organization_memberships_org_user"),
+        CheckConstraint(
+            "role IN ('org_admin', 'recruiter', 'candidate')",
+            name="ck_organization_memberships_role",
+        ),
+        CheckConstraint(
+            "status IN ('active', 'revoked')",
+            name="ck_organization_memberships_status",
+        ),
+        Index(
+            "ix_organization_memberships_org_status_role",
+            "organization_id",
+            "status",
+            "role",
+        ),
+    )
+
+
 class CandidateInvitationRecord(Base):
     __tablename__ = "candidate_invitations"
 
     id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
-    candidate_id: Mapped[str] = mapped_column(
-        String, ForeignKey("candidates.id"), nullable=False, index=True
+    candidate_id: Mapped[str | None] = mapped_column(
+        String, ForeignKey("candidates.id"), nullable=True, index=True
     )
     recruiter_user_id: Mapped[str] = mapped_column(
         String, ForeignKey("users.id"), nullable=False, index=True
     )
+    organization_id: Mapped[str | None] = mapped_column(
+        String, ForeignKey("organizations.id"), nullable=True, index=True
+    )
+    candidate_name: Mapped[str | None] = mapped_column(String, nullable=True)
     email: Mapped[str] = mapped_column(String, nullable=False)
     token_hash: Mapped[str] = mapped_column(String, nullable=False, unique=True)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
@@ -93,6 +145,32 @@ class CandidateInvitationRecord(Base):
             "recruiter_user_id",
             "created_at",
         ),
+        Index(
+            "uq_candidate_invitations_one_pending_per_org_email",
+            "organization_id",
+            "email",
+            unique=True,
+            sqlite_where=(
+                organization_id.is_not(None)
+                & consumed_at.is_(None)
+                & revoked_at.is_(None)
+            ),
+            postgresql_where=(
+                organization_id.is_not(None)
+                & consumed_at.is_(None)
+                & revoked_at.is_(None)
+            ),
+        ),
+        ForeignKeyConstraint(
+            ["organization_id", "recruiter_user_id"],
+            ["organization_memberships.organization_id", "organization_memberships.user_id"],
+            name="fk_candidate_invitations_org_recruiter_membership",
+        ),
+        ForeignKeyConstraint(
+            ["organization_id", "candidate_id"],
+            ["candidates.organization_id", "candidates.id"],
+            name="fk_candidate_invitations_org_candidate",
+        ),
     )
 
 
@@ -101,24 +179,52 @@ class CandidateRecord(Base):
 
     id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
     name: Mapped[str] = mapped_column(String, nullable=False)
-    email: Mapped[str] = mapped_column(String, nullable=False, unique=True, index=True)
+    email: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    organization_id: Mapped[str | None] = mapped_column(
+        String, ForeignKey("organizations.id"), nullable=True, index=True
+    )
     owner_user_id: Mapped[str | None] = mapped_column(String, ForeignKey("users.id"), nullable=True, index=True)
-    user_id: Mapped[str | None] = mapped_column(String, ForeignKey("users.id"), nullable=True, unique=True, index=True)
+    user_id: Mapped[str | None] = mapped_column(String, ForeignKey("users.id"), nullable=True, index=True)
     phone: Mapped[str | None] = mapped_column(String, nullable=True)
     resume_url: Mapped[str | None] = mapped_column(String, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+
+    __table_args__ = (
+        UniqueConstraint("organization_id", "email", name="uq_candidates_org_email"),
+        UniqueConstraint("organization_id", "id", name="uq_candidates_org_id"),
+        UniqueConstraint("organization_id", "user_id", name="uq_candidates_org_user"),
+        ForeignKeyConstraint(
+            ["organization_id", "owner_user_id"],
+            ["organization_memberships.organization_id", "organization_memberships.user_id"],
+            name="fk_candidates_org_owner_membership",
+        ),
+        ForeignKeyConstraint(
+            ["organization_id", "user_id"],
+            ["organization_memberships.organization_id", "organization_memberships.user_id"],
+            name="fk_candidates_org_user_membership",
+        ),
+    )
 
 
 class AccessAuditRecord(Base):
     __tablename__ = "access_audit"
 
     id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
-    actor_user_id: Mapped[str] = mapped_column(String, ForeignKey("users.id"), nullable=False, index=True)
+    actor_user_id: Mapped[str | None] = mapped_column(String, ForeignKey("users.id"), nullable=True, index=True)
+    organization_id: Mapped[str | None] = mapped_column(String, ForeignKey("organizations.id"), nullable=True, index=True)
+    requested_organization_id: Mapped[str | None] = mapped_column(String, nullable=True)
     action: Mapped[str] = mapped_column(String, nullable=False)
     resource_type: Mapped[str] = mapped_column(String, nullable=False)
     resource_id: Mapped[str] = mapped_column(String, nullable=False)
+    outcome: Mapped[str] = mapped_column(String, nullable=False, default="allowed")
+    support_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    request_id: Mapped[str | None] = mapped_column(String, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC), nullable=False)
+
+    __table_args__ = (
+        Index("uq_access_audit_request_id", "request_id", unique=True),
+    )
 
 
 class InterviewRecord(Base):
@@ -127,12 +233,29 @@ class InterviewRecord(Base):
     id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
     owner_user_id: Mapped[str | None] = mapped_column(String, ForeignKey("users.id"), nullable=True, index=True)
     candidate_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    organization_id: Mapped[str | None] = mapped_column(
+        String, ForeignKey("organizations.id"), nullable=True, index=True
+    )
     position: Mapped[str] = mapped_column(String, nullable=False)
     mode: Mapped[str] = mapped_column(String, nullable=False, default="text")
     current_question: Mapped[str] = mapped_column(String, nullable=False)
     state_json: Mapped[str] = mapped_column(String, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+
+    __table_args__ = (
+        UniqueConstraint("organization_id", "id", name="uq_interviews_org_id"),
+        ForeignKeyConstraint(
+            ["organization_id", "candidate_id"],
+            ["candidates.organization_id", "candidates.id"],
+            name="fk_interviews_org_candidate",
+        ),
+        ForeignKeyConstraint(
+            ["organization_id", "owner_user_id"],
+            ["organization_memberships.organization_id", "organization_memberships.user_id"],
+            name="fk_interviews_org_owner_membership",
+        ),
+    )
 
 
 class InterviewTurnRecord(Base):
@@ -263,6 +386,10 @@ class RAGDocumentRecord(Base):
     competency_id: Mapped[str | None] = mapped_column(String, nullable=True)
     job_id: Mapped[str | None] = mapped_column(String, nullable=True)
     organization_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    scope: Mapped[str] = mapped_column(
+        String, nullable=False, default="unclassified", server_default="unclassified"
+    )
+    scope_approval_reference: Mapped[str | None] = mapped_column(String, nullable=True)
     difficulty: Mapped[str | None] = mapped_column(String, nullable=True)
     source: Mapped[str] = mapped_column(String, nullable=False)
     version: Mapped[str] = mapped_column(String, nullable=False)
@@ -277,7 +404,53 @@ class RAGDocumentRecord(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC))
 
     __table_args__ = (
-        UniqueConstraint("document_id", "chunk_id", "version", name="uq_rag_document_chunk_version"),
+        CheckConstraint(
+            "scope IN ('organization', 'global', 'unclassified')",
+            name="ck_rag_documents_scope",
+        ),
+        CheckConstraint(
+            "(scope = 'organization' AND organization_id IS NOT NULL "
+            "AND trim(organization_id) <> '') OR "
+            "(scope = 'global' AND organization_id IS NULL) OR "
+            "scope = 'unclassified'",
+            name="ck_rag_documents_scope_organization",
+        ),
+        CheckConstraint(
+            "(scope = 'global' AND scope_approval_reference IS NOT NULL "
+            "AND trim(scope_approval_reference) <> '') OR "
+            "(scope IN ('organization', 'unclassified') "
+            "AND scope_approval_reference IS NULL)",
+            name="ck_rag_documents_scope_approval",
+        ),
+        Index(
+            "uq_rag_document_chunk_org_scope_version",
+            "organization_id",
+            "document_id",
+            "chunk_id",
+            "version",
+            unique=True,
+            postgresql_where=(scope == "organization"),
+            sqlite_where=(scope == "organization"),
+        ),
+        Index(
+            "uq_rag_document_chunk_nontenant_scope_version",
+            "scope",
+            "document_id",
+            "chunk_id",
+            "version",
+            unique=True,
+            postgresql_where=(scope.in_(("global", "unclassified"))),
+            sqlite_where=(scope.in_(("global", "unclassified"))),
+        ),
+        Index(
+            "ix_rag_document_scope_filters",
+            "active",
+            "scope",
+            "organization_id",
+            "job_id",
+            "competency_id",
+            "difficulty",
+        ),
         Index("ix_rag_document_filters", "active", "job_id", "competency_id", "difficulty"),
         Index("ix_rag_document_embedding_model", "embedding_model", "embedding_dimension"),
     )

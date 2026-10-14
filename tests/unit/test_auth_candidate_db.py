@@ -2,6 +2,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from apps.api.main import app
+from tests.unit.tenant_test_utils import create_candidate_through_invitation, create_tenant
 
 
 @pytest.fixture
@@ -10,7 +11,7 @@ def client():
         yield test_client
 
 
-def test_db_backed_auth_and_candidate_store(client: TestClient):
+def test_db_backed_auth_and_invitation_created_candidate_store(client: TestClient):
     register = client.post(
         "/api/v1/auth/register",
         json={"email": "admin-db@example.com", "password": "secret123", "role": "admin"},
@@ -34,9 +35,22 @@ def test_db_backed_auth_and_candidate_store(client: TestClient):
         },
         headers={"Authorization": f"Bearer {token}"},
     )
-    assert create_candidate.status_code == 200
-    candidate_id = create_candidate.json()["id"]
+    assert create_candidate.status_code == 409
+
+    tenant = create_tenant(client)
+    candidate, candidate_headers, profile, _invitation = (
+        create_candidate_through_invitation(client, tenant)
+    )
+    candidate_id = profile["candidate_id"]
+    candidate_fetch = client.get(
+        f"/api/v1/candidates/{candidate_id}",
+        headers={
+            **candidate_headers,
+            "X-Organization-ID": tenant.organization_id,
+        },
+    )
+    assert candidate_fetch.status_code == 200
+    assert candidate_fetch.json()["email"] == candidate["email"]
 
     fetch = client.get(f"/api/v1/candidates/{candidate_id}", headers={"Authorization": f"Bearer {token}"})
-    assert fetch.status_code == 200
-    assert fetch.json()["email"] == "admin-db@example.com"
+    assert fetch.status_code == 403
