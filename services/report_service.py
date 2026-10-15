@@ -181,6 +181,20 @@ class ReportService:
             "candidate_id": interview.candidate_id,
             "interview_id": interview.id,
             "position": interview.position,
+            "campaign": (
+                None
+                if interview.campaign_id is None
+                else {
+                    "campaign_id": interview.campaign_id,
+                    "application_id": interview.application_id,
+                    "schedule_id": interview.schedule_id,
+                    "objective_version": interview.objective_version,
+                    "plan_version": interview.plan_version,
+                    "rubric_snapshot": json.loads(
+                        interview.rubric_snapshot_json or "[]"
+                    ),
+                }
+            ),
             "completion_status": persisted_state.get("status", "unknown"),
             "is_final": is_final,
             "evaluation_status": evaluation_status,

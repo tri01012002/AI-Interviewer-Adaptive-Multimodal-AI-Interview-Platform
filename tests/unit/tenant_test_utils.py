@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime, timedelta
 from uuid import uuid4
 
 from fastapi.testclient import TestClient
@@ -75,6 +75,37 @@ def create_tenant(client: TestClient, name: str = "Synthetic Organization") -> T
         recruiter=recruiter,
         recruiter_headers=recruiter_headers,
     )
+
+
+def set_complete_campaign_objective(
+    client: TestClient,
+    tenant: TenantFixture,
+    campaign_id: str,
+    *,
+    requested_role: str = "Software Engineer",
+) -> dict:
+    response = client.put(
+        f"/api/v1/recruitment-campaigns/{campaign_id}/objective",
+        json={
+            "expected_version": 1,
+            "idempotency_key": f"objective-{campaign_id}",
+            "objective": {
+                "requested_role": requested_role,
+                "seniority": "Senior",
+                "target_headcount": 2,
+                "deadline": (date.today() + timedelta(days=30)).isoformat(),
+                "timezone_name": "UTC",
+                "required_qualifications": [],
+                "success_criteria": [
+                    "Organization administrator explicitly confirms the approved hiring criteria."
+                ],
+                "clarifications": [],
+            },
+        },
+        headers=tenant_headers(tenant.recruiter_headers, tenant.organization_id),
+    )
+    assert response.status_code == 200, response.text
+    return response.json()
 
 
 def add_recruiter(

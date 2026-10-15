@@ -89,6 +89,10 @@ app = FastAPI(
     debug=settings.DEBUG,
 )
 
+from apps.api.v1.routes.recruitment_campaigns import router as recruitment_campaigns_router
+
+app.include_router(recruitment_campaigns_router, prefix="/api/v1")
+
 # ==========================================
 # Middleware
 # ==========================================

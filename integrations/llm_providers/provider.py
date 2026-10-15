@@ -203,6 +203,33 @@ class DeterministicMockProvider:
                 ),
                 "next_action": "DIG_DEEPER",
             }
+        elif schema.__name__ == "GeneratedJobDesign":
+            fixture = {
+                "structured_requirements": {
+                    "mock_fixture": True,
+                    "notice": "MOCK DATA - NOT AI-GENERATED",
+                },
+                "job_description": (
+                    "[MOCK - NOT AI-GENERATED] Offline fixture only; "
+                    "replace with a human-reviewed job description."
+                ),
+                "competency_rubric": [
+                    {
+                        "competency": "mock-placeholder",
+                        "weight": 1.0,
+                        "notice": "MOCK DATA - NOT A REAL HIRING CRITERION",
+                    }
+                ],
+                "application_form_schema": {
+                    "type": "object",
+                    "properties": {
+                        "mock_placeholder": {
+                            "type": "string",
+                            "description": "MOCK DATA - NOT AI-GENERATED",
+                        }
+                    },
+                },
+            }
         else:
             raise LLMProviderError(
                 f"No deterministic mock fixture is defined for {schema.__name__}"

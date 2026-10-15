@@ -138,7 +138,18 @@ class InterviewAgentCore:
         self._context_retriever = context_retriever
         self.graph = self._build_graph()
 
-    def start_interview(self, candidate_id: str, position: str) -> dict[str, Any]:
+    def start_interview(
+        self,
+        candidate_id: str,
+        position: str,
+        competencies: list[str] | None = None,
+    ) -> dict[str, Any]:
+        planned_competencies = competencies or [
+            "python",
+            "pytorch",
+            "computer_vision",
+            "distributed_systems",
+        ]
         return {
             "candidate_id": candidate_id,
             "position": position,
@@ -153,9 +164,9 @@ class InterviewAgentCore:
             "follow_up_questions": [],
             "mode": "text",
             "difficulty": "medium",
-            "current_competency": "general",
+            "current_competency": competencies[0] if competencies else "general",
             "interview_plan": {
-                "competencies": ["python", "pytorch", "computer_vision", "distributed_systems"],
+                "competencies": planned_competencies,
                 "question_budget": settings.DEFAULT_NUM_QUESTIONS,
                 "duration_seconds": settings.DEFAULT_INTERVIEW_DURATION,
             },

@@ -5,11 +5,12 @@ AI Interviewer - Main application configuration
 from functools import lru_cache
 from typing import Optional
 
-from pydantic import Field
-from pydantic_settings import BaseSettings
+from pydantic import Field, SecretStr
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
+    model_config = SettingsConfigDict(env_file=".env", case_sensitive=True)
     """Application settings"""
 
     # Application
@@ -154,13 +155,28 @@ class Settings(BaseSettings):
     CELERY_TASK_TRACK_STARTED: bool = True
     CELERY_TASK_TIME_LIMIT: int = 3600
 
+    # Recruitment campaign database dispatcher
+    CAMPAIGN_WORKER_POLL_SECONDS: float = Field(default=2.0, gt=0, le=60)
+    CAMPAIGN_WORKER_CONCURRENCY: int = Field(default=2, ge=1, le=32)
+    CAMPAIGN_WORKER_RETRY_BASE_SECONDS: int = Field(default=5, ge=1, le=3600)
+    CAMPAIGN_WORKER_RETRY_MAX_SECONDS: int = Field(default=300, ge=1, le=86400)
+    CAMPAIGN_WORKER_LEASE_SECONDS: int = Field(default=120, ge=10, le=3600)
+
+    # Email delivery is simulated unless an operator explicitly selects SMTP.
+    EMAIL_PROVIDER: str = "offline_simulation"
+    EMAIL_SMTP_HOST: str = ""
+    EMAIL_SMTP_PORT: int = Field(default=587, ge=1, le=65535)
+    EMAIL_SMTP_USERNAME: str = ""
+    EMAIL_SMTP_PASSWORD: SecretStr = SecretStr("")
+    EMAIL_SMTP_FROM: str = ""
+    EMAIL_SMTP_TIMEOUT_SECONDS: float = Field(default=10.0, gt=0, le=30)
+
     # Storage
     STORAGE_TYPE: str = "local"
     STORAGE_PATH: str = "./storage"
+    CV_STORAGE_PATH: str = "storage/private_cv"
+    CV_MAX_UPLOAD_BYTES: int = Field(default=5 * 1024 * 1024, gt=0, le=25 * 1024 * 1024)
 
-    class Config:
-        env_file = ".env"
-        case_sensitive = True
 
 
 @lru_cache()

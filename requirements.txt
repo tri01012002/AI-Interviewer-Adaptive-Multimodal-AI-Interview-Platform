@@ -34,6 +34,8 @@ soundfile==0.12.1
 httpx==0.24.1
 aiofiles==23.2.1
 python-multipart==0.0.6
+pypdf>=5.0.0,<7.0.0
+python-docx>=1.1.2,<2.0.0
 
 # Security & Auth
 python-jose[cryptography]==3.3.0

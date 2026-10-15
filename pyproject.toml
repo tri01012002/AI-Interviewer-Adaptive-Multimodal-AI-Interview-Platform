@@ -60,6 +60,8 @@ dependencies = [
     # Voice
     "openai>=1.0.0",
     "python-multipart>=0.0.6",
+    "pypdf>=5.0.0,<7.0.0",
+    "python-docx>=1.1.2,<2.0.0",
     "pydub>=0.25.1",
     
     # Utilities

@@ -9,6 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, ConfigDict, Field
 
 from services.interview_service import (
+    CampaignInterviewNotReadyError,
     InterviewConflictError,
     InterviewEvaluationError,
     InterviewForbiddenError,
@@ -40,6 +41,13 @@ class InterviewStartRequest(BaseModel):
     mode: str = "text"
 
 
+class CampaignInterviewStartRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schedule_id: str = Field(..., min_length=1)
+    mode: str = "text"
+
+
 class InterviewAnswerRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -65,6 +73,38 @@ async def start_interview(
         )
     except InterviewNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Candidate not found") from exc
+
+
+@router.post(
+    "/interview/campaigns/{campaign_id}/applications/{application_id}/start",
+    tags=["Interview"],
+)
+async def start_campaign_interview(
+    campaign_id: str,
+    application_id: str,
+    payload: CampaignInterviewStartRequest,
+    context: TenantContext = Depends(tenant_context),
+) -> dict[str, Any]:
+    try:
+        return service.start_campaign_interview(
+            campaign_id=campaign_id,
+            application_id=application_id,
+            schedule_id=payload.schedule_id,
+            mode=payload.mode,
+            owner_user_id=context.actor_user_id,
+            owner_role=context.role,
+            organization_id=context.organization_id,
+        )
+    except CampaignInterviewNotReadyError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(exc),
+        ) from exc
+    except InterviewNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Application not found",
+        ) from exc
 
 
 @router.post("/interview/{interview_id}/answer", tags=["Interview"])

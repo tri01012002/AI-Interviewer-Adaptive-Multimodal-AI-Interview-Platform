@@ -39,6 +39,16 @@ class InterviewRepository:
             owner_user_id=owner_user_id,
             candidate_id=state["candidate_id"],
             organization_id=organization_id,
+            campaign_id=state.get("campaign_id"),
+            application_id=state.get("application_id"),
+            schedule_id=state.get("schedule_id"),
+            objective_version=state.get("objective_version"),
+            plan_version=state.get("plan_version"),
+            rubric_snapshot_json=(
+                None
+                if state.get("rubric_snapshot") is None
+                else json.dumps(state["rubric_snapshot"], separators=(",", ":"))
+            ),
             position=state["position"],
             mode=state.get("mode", "text"),
             current_question=state["current_question"],
