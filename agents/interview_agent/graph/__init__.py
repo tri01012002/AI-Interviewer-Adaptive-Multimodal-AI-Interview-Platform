@@ -21,6 +21,7 @@ except ImportError:  # pragma: no cover - compatibility with older LangGraph rel
 
 from pydantic import BaseModel, Field, ValidationError
 
+from agents.authorization import require_agent
 from config import settings
 from evaluation.service import EvaluationResult, Rubric
 from integrations.llm_providers.provider import LLMProvider, LLMProviderError
@@ -122,6 +123,8 @@ def _default_analyzer(answer: str, state: InterviewGraphState) -> AnswerAnalysis
 class InterviewAgentCore:
     """Compiled adaptive graph with injectable structured answer analysis."""
 
+    agent_id = "interview-agent"
+
     def __init__(
         self,
         analyzer: Analyzer | None = None,
@@ -138,6 +141,7 @@ class InterviewAgentCore:
         self.graph = self._build_graph()
 
     def start_interview(self, candidate_id: str, position: str) -> dict[str, Any]:
+        require_agent(self.agent_id, "interview-agent")
         return {
             "candidate_id": candidate_id,
             "position": position,
@@ -170,6 +174,7 @@ class InterviewAgentCore:
         rubric: Rubric | None = None,
         asked_questions: list[str] | None = None,
     ) -> dict[str, Any]:
+        require_agent(self.agent_id, "interview-agent")
         execution_id = str(uuid4())
         started_at = perf_counter()
         graph_state: InterviewGraphState = {

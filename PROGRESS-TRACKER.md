@@ -233,7 +233,7 @@ Add a `JobRecord` and its Alembic migration, then add dedicated Pydantic schemas
 - Added recruiter-only `POST /api/v1/jobs`, `GET /api/v1/jobs`, and `GET /api/v1/jobs/{job_id}`.
 - Added recruiter-only `POST /api/v1/jobs/generate`, using the existing structured `LLMProvider` boundary and persisting generated output as a draft job.
 - Added `SupervisorAgent` as the top-level orchestrator and `SupervisorService` as its application boundary. Recruiters request `POST /api/v1/jobs/{job_id}/approve`; the agent owns the approval transition and approved jobs are the only jobs exposed through the Browser Agent accessor.
-- Added focused authorization and persistence tests in `tests/unit/test_jobs.py`.
+- Added focused authorization and persistence tests in `tests/unit/test_jd.py`.
 - `compileall` and `git diff --check` pass. Pytest/Alembic execution is currently blocked because the active `.venv` has no `pytest`, `fastapi`, `sqlalchemy`, or `alembic` packages installed.
 
 ## 9. Immediate Task

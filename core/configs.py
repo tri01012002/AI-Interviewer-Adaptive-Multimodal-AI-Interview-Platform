@@ -19,7 +19,7 @@ class EnvConfig(BaseSettings):
         "anthropic",
         "openai",
         "openrouter"
-    ] = "anthropic"
+    ] = "groq"
 
     # =========================
     # API Keys
@@ -102,5 +102,5 @@ MAX_UPLOAD_MB = 20
 
 # from src.app_logging import setup_logging
 # setup_logging()
-print("model : ",env_config.model)
+print("model : ",env_config.groq_model)
 print("api_key : ",env_config.groq_api_key)

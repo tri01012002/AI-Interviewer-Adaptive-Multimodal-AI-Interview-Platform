@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from apps.api.v1.schemas.recruitment import GeneratedJobDescription
+from apps.api.v1.schemas.recruitment import JobDescription
 from config import settings
 from integrations.llm_providers.provider import (
     LLMConfigurationError,
@@ -14,7 +14,7 @@ from integrations.llm_providers.provider import (
 from services.job_store import JobStore
 
 
-class JobDescriptionService:
+class JDGenerationService:
     def __init__(self, provider: LLMProvider | None = None) -> None:
         self.provider = provider if provider is not None else provider_from_settings(settings)
 
@@ -31,6 +31,6 @@ requirements that are not supported by the request. Return only the requested sc
                 f"Hiring request: {payload['hiring_request']}\n"
                 f"Additional requirements: {payload.get('requirements', [])}"
             ),
-            GeneratedJobDescription,
+            JobDescription,
         )
         return JobStore.create(result.model_dump(), owner_user_id)

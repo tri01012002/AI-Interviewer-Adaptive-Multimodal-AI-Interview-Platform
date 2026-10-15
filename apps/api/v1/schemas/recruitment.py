@@ -6,7 +6,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 
-class CreateJobRequest(BaseModel):
+class JobDescription(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     title: str = Field(..., min_length=1)
@@ -19,12 +19,6 @@ class GenerateJobRequest(BaseModel):
 
     title: str = Field(..., min_length=1)
     hiring_request: str = Field(..., min_length=1)
-    requirements: list[str] = Field(default_factory=list)
-
-
-class GeneratedJobDescription(BaseModel):
-    title: str = Field(..., min_length=1)
-    description: str = Field(..., min_length=1)
     requirements: list[str] = Field(default_factory=list)
 
 

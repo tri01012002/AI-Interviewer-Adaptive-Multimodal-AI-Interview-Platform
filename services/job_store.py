@@ -26,18 +26,19 @@ class JobStore:
             return cls._to_dict(job)
 
     @classmethod
-    def list(cls, actor_user_id: str, role: str) -> list[dict[str, Any]]:
-        query = select(JobRecord).order_by(JobRecord.created_at.desc())
-        if role != "admin":
-            query = query.where(JobRecord.owner_user_id == actor_user_id)
+    def list(cls, owner_user_id: str) -> list[dict[str, Any]]:
+        query = select(JobRecord).where(
+            JobRecord.owner_user_id == owner_user_id
+        ).order_by(JobRecord.created_at.desc())
         with SessionLocal.begin() as session:
             return [cls._to_dict(job) for job in session.execute(query).scalars().all()]
 
     @classmethod
-    def get(cls, job_id: str, actor_user_id: str, role: str) -> dict[str, Any] | None:
-        query = select(JobRecord).where(JobRecord.id == job_id)
-        if role != "admin":
-            query = query.where(JobRecord.owner_user_id == actor_user_id)
+    def get(cls, job_id: str, owner_user_id: str) -> dict[str, Any] | None:
+        query = select(JobRecord).where(
+            JobRecord.id == job_id,
+            JobRecord.owner_user_id == owner_user_id,
+        )
         with SessionLocal.begin() as session:
             job = session.execute(query).scalar_one_or_none()
             return cls._to_dict(job) if job is not None else None
@@ -57,7 +58,12 @@ class JobStore:
             return cls._to_dict(job)
 
     @classmethod
-    def get_approved_for_browser(cls, job_id: str) -> dict[str, Any] | None:
+    def get_approved_for_browser(
+        cls, job_id: str, agent_id: str = "browser-agent"
+    ) -> dict[str, Any] | None:
+        from agents.authorization import require_agent
+
+        require_agent(agent_id, "browser-agent")
         with SessionLocal.begin() as session:
             job = session.execute(
                 select(JobRecord).where(

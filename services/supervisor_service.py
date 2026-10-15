@@ -11,3 +11,7 @@ class SupervisorService:
     @staticmethod
     def approve_job(job_id: str) -> dict | None:
         return SupervisorAgent().approve_job(job_id)
+
+    @staticmethod
+    def route_task(task_type: str, payload: dict) -> object:
+        return SupervisorAgent().route_task(task_type, payload)
