@@ -24,6 +24,8 @@ logger = get_logger(__name__)
 _AUDITED_PREFIXES = (
     "/api/v1/candidates",
     "/api/v1/candidate-invitations",
+    "/api/v1/recruitment-campaigns",
+    "/api/v1/recruitment-campaign-executions",
     "/api/v1/interview",
     "/api/v1/interviews",
 )
@@ -201,6 +203,8 @@ def _resource_from_path(path: str) -> tuple[str, str]:
         ("interviews", "interview"),
         ("candidates", "candidate"),
         ("candidate-invitations", "candidate_invitation"),
+        ("recruitment-campaigns", "recruitment_campaign"),
+        ("recruitment-campaign-executions", "recruitment_campaign_execution"),
     ):
         if collection in parts:
             index = parts.index(collection)

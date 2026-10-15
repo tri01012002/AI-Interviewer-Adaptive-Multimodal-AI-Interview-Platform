@@ -96,8 +96,12 @@ python -m alembic downgrade -1
 python -m alembic upgrade head
 ```
 
-The current head is `d3f7_tenant_isolation`. Downgrade is only for disposable, unassigned
-fixtures: `d3f7_tenant_isolation` refuses to run when tenant ownership or support-audit data exists.
+The current head is `g18_internal_interview_scheduling`, after
+`g17_candidate_availability`, `g16_candidate_communications`, `g15_candidate_intake_screening`, `g14_recruitment_campaign_dispatcher`,
+`g13_recruitment_campaign_orchestration`, `g12_recruitment_campaign_foundation`, and
+`f29_required_audit_request_ids`. Downgrade is only for
+disposable, unassigned fixtures: `d3f7_tenant_isolation` refuses to run when tenant ownership or
+support-audit data exists.
 
 ## Schema Overview
 
@@ -109,7 +113,178 @@ fixtures: `d3f7_tenant_isolation` refuses to run when tenant ownership or suppor
 - `interview_evidence`: minimal future evidence storage.
 - `interview_competency_state`: minimal future competency state storage.
 - `rag_documents`: versioned, active/inactive retrieval chunks, scope metadata, and optional embedding vectors.
-- `access_audit`: durable audit events for privileged admin resource access.
+- `access_audit`: append-only durable audit events for privileged access and significant campaign
+  approval/execution transitions.
+- `recruitment_campaigns`: tenant-scoped recruitment plans and explicit approval decisions.
+- `recruitment_campaign_executions` and `recruitment_campaign_execution_steps`: durable campaign
+  execution status, step inputs/results, bounded attempts, and restart-recovery leases.
+- `recruitment_applications`: one application per campaign/candidate, tenant-consistent foreign
+  keys, durable processing status, bounded attempts, retry scheduling, and lease fencing.
+- `candidate_cv_documents`: private-storage metadata, content hash, parser status/version, parsed
+  fields, and extracted text. The database never stores the uploaded binary.
+- `candidate_screenings` and `candidate_criterion_assessments`: immutable rubric snapshot/hash and
+  criterion-level evidence, uncertainty, scores, and human review state.
+- `candidate_availability_requests`, `candidate_availability_responses`, and
+  `candidate_availability_events`: tenant-consistent requests and versioned candidate preferences,
+  with append-only state events and bounded worker expiration. Instants are stored in UTC;
+  timestamps must carry an explicit offset that agrees with the retained IANA timezone. Intervals
+  use half-open `[start, end)` semantics, and a submitted preference is never a booking.
+
+Availability requests follow `pending_response -> responded -> reviewed`, with either pending or
+responded requests expiring at their deadline and eligible open/reviewed requests cancellable by a
+recruiter. Loss of application or campaign eligibility cancels the request. Candidate updates are
+versioned and accepted only before review; each submission idempotency key is retained separately.
+The existing campaign worker performs a bounded expiration/eligibility sweep only while unpaused.
+Requests are limited to 10 windows, 15-240 minute interview durations, deadlines 5 minutes to 30
+days ahead, and proposed slots no more than 90 days ahead. Recruiters create/list by campaign and
+review/cancel by request; authenticated candidates read and submit only for their owned application.
+
+`interview_schedules`, `interview_schedule_reservations`, and `interview_schedule_events` persist
+internal interview proposals, active resource claims, and transition history. Their state flow is
+`proposed -> pending_confirmation -> confirmed_internal`; rescheduling creates a separate
+`reschedule_pending` replacement while the existing confirmed reservation remains active. On
+successful replacement confirmation, the replacement claims are written before the old claims are
+released, within one transaction. Failed replacement confirmation leaves the original reservation
+unchanged. Cancellation immediately releases claims; an expired reschedule leaves the original
+reservation active. Proposals and replacement requests expire after seven days unless confirmed.
+`needs_attention` indicates that the expiration sweep found an inconsistent
+active-claim set and will not silently free or overwrite it.
+
+Only approved campaigns with eligible applications and recruiter-reviewed candidate preferences
+can be scheduled. The chosen preference supplies the UTC interval, duration, and retained IANA
+display timezone. Intervals are half-open `[start, end)`. Candidate, interviewer, and explicit
+exclusive-resource claims are tenant-scoped; room/resource identifiers are not global. The
+`interview_schedule_mutex` row is updated in the same transaction before checking overlapping
+claims, serializing reservation, replacement, cancellation, and expiration writes across workers.
+Database partial unique indexes additionally limit an application to one confirmed internal
+schedule and one pending replacement. `confirmed_internal` is only an internal database
+reservation, not an external calendar booking or meeting. APIs are available under
+`/api/v1/interview-schedules`, campaign schedule routes, and the reviewed-availability
+`schedule-slots` route. The existing campaign worker expires bounded pending schedules only while
+unpaused. No calendar, email, meeting-provider, or live-AI integration is invoked.
+
+Recruitment campaign execution transitions are deterministic:
+
+```text
+pending -> running -> completed
+                   -> waiting_for_approval -> pending (after re-approval)
+                   -> retryable_failure -> running
+                   -> needs_attention
+running (expired lease) -> running (resume)
+```
+
+A campaign has at most one campaign-plan execution record and one `job_design` step for that
+execution. Candidate applications are separate durable work items claimed by the same database
+dispatcher; their application-specific statuses do not create a second general-purpose workflow
+engine. A database lease is claimed atomically before processing, and expired application leases
+are eligible for recovery. Provider-created artifacts move the campaign back to pending approval.
+`LLM_PROVIDER=none` never fills missing artifacts with fabricated text; it leaves an actionable
+`needs_attention` result instead.
+
+## Candidate CV intake and screening (implemented)
+
+An invited candidate must redeem their invitation and be authenticated as the candidate linked to
+an active organization membership. They may submit one PDF or DOCX CV to an approved campaign:
+
+```text
+POST /api/v1/recruitment-campaigns/{campaign_id}/applications/cv
+GET  /api/v1/recruitment-applications/{application_id}
+POST /api/v1/recruitment-applications/{application_id}/review
+```
+
+Uploads are size-limited, checked against the file signature and document structure, assigned a
+generated storage key, and written under `CV_STORAGE_PATH`; the client filename is never used as a
+path. The current local storage adapter is for development/testing only. A production deployment
+must configure a persistent, private, access-controlled storage volume shared by the API and worker,
+with its own backup, encryption, and retention controls. The CV directory is not mounted as public
+static content. The API reads no more than `CV_MAX_UPLOAD_BYTES + 1` bytes; production ingress
+must also enforce a multipart request-body limit before spooling uploads. Application audit records
+contain identifiers and actions, not file content. No automatic CV deletion schedule is currently
+implemented; deployments must define and enforce an approved retention/deletion policy before
+production use.
+
+The database worker parses PDF/DOCX text using deterministic local libraries and screens only
+against a compatible approved rubric. A screening rubric criterion must provide a stable id/title,
+explicit `evidence_terms`, and a numeric `score_scale` containing `minimum`, `maximum`, and
+`score_when_evidenced`. The immutable rubric JSON is retained with a SHA-256 rubric version.
+Explicit matching terms may produce a rubric score; absence produces a null score and is explicitly
+not treated as proof that a candidate lacks a skill. Protected-characteristic or proxy criteria and
+incompatible rubrics stop processing for correction. Every assessment requires human review; the
+review endpoint can confirm/correct criterion assessments but does not make hiring or rejection
+decisions.
+
+The parser extracts skills/technology mentions, date-bearing employment lines, education lines, and
+project-section text heuristically. This is not a full CV understanding system. Extracted text is
+stored in the tenant-protected database for evidence offsets and audit reproducibility, and must be
+handled as sensitive personal data under the deployment's retention policy. CV instructions are
+treated as untrusted content; this baseline does not send CV text to an LLM or any external service.
+The dispatcher is at-least-once: expired work may be parsed more than once, while claim-token
+fencing and unique application/screening constraints prevent stale or repeated persisted results.
+This does not guarantee exactly-once parsing.
+
+## Candidate communications (R4.1)
+
+Communications are durable, tenant-scoped records tied by composite foreign keys to the same
+campaign and application. Drafts use an organization-scoped idempotency key, preserve the exact
+plain-text template snapshot/version, derive the recipient from the application candidate, and do
+not update application status, screening scores, or review outcomes.
+
+```text
+POST /api/v1/recruitment-applications/{application_id}/communications
+GET  /api/v1/candidate-communications/{communication_id}
+POST /api/v1/candidate-communications/{communication_id}/submit
+POST /api/v1/candidate-communications/{communication_id}/approve
+POST /api/v1/candidate-communications/{communication_id}/retry
+POST /api/v1/candidate-communications/{communication_id}/cancel
+POST /api/v1/candidate-communications/{communication_id}/reconcile
+```
+
+The communication state machine is `draft -> awaiting_approval -> approved -> sending`, then
+`simulated`, `sent`, `retryable_failure`, or `needs_attention`. A definitive rejection ends in
+`needs_attention` without an unknown delivery status; only reliably not-accepted outcomes can be
+retried. Pre-send states and known non-accepted attention states can be cancelled; unknown outcomes
+require reconciliation first. Only organization administrators (or an explicitly scoped platform
+administrator) may approve. The existing database worker dispatches approved communications under
+its pause, concurrency, and lease controls, and rechecks campaign approval immediately before
+delivery.
+Expired `sending` claims become `needs_attention` with an unknown delivery outcome; they are never
+blindly resent. Transient failures use the bounded worker retry policy and retain the same
+communication/idempotency identity.
+
+The provider boundary defaults to `EMAIL_PROVIDER=offline_simulation`, which never makes network
+calls and terminates in `simulated`; `sent_at` stays unset. `EMAIL_PROVIDER=smtp` explicitly selects
+the STARTTLS SMTP adapter and requires `EMAIL_SMTP_HOST`, `EMAIL_SMTP_USERNAME`,
+`EMAIL_SMTP_PASSWORD`, and `EMAIL_SMTP_FROM`. Real SMTP is rejected in `ENVIRONMENT=test`; missing
+credentials and unknown provider names raise configuration errors rather than falling back. The
+adapter has no provider idempotency support. It receives a stable internal communication UUID as
+the logical key, but SMTP does not deduplicate it; provider-side key scope and retention do not
+apply.
+
+`sent` means the provider reported acceptance (for SMTP, acceptance of the message by the SMTP
+server after submission), not delivery to the candidate's inbox. Explicit SMTP rejection before
+acceptance is either retryable (`4xx`) or definitive (`5xx`). A connection failure before message
+submission is retryable; timeout/disconnect or any other ambiguous exception after submission
+begins becomes `needs_attention`/`unknown` and is never automatically retried. Expired leases use
+the same unknown path and stale workers cannot commit after their token expires or is replaced.
+Organization administrators can use `/reconcile` to record an authoritative `accepted`,
+`not_accepted`, or `unresolved` determination. An accepted decision records `sent`; not-accepted
+permits normal bounded retry only while campaign approval remains active; unresolved keeps the
+record in `needs_attention`. This is an audited human reconciliation, not a provider lookup or
+proof of exactly-once delivery.
+
+Approval and tenant/application scope are rechecked immediately before the provider call, and
+campaign approval is checked again before outcome persistence. Preflight failure cancels the
+undelivered attempt. Cancellation is available only before a send is claimed; a sending attempt
+cannot be recalled. An unknown outcome cannot be cancelled or retried until an administrator
+reconciles it. If campaign approval is revoked after submission begins, an explicit provider
+acceptance is still recorded as `sent` with an audit marker; ambiguous outcomes remain
+`needs_attention`/`unknown`. Audit/events contain only allowlisted provider metadata and state; they
+never include credentials, recipient addresses, or message bodies. Recipient addresses and rendered
+messages are stored in the application database without field-level encryption; production use
+requires database encryption at rest, strict access controls, and an enforced retention/deletion
+policy. Templates use plain-text `string.Template` substitution with a strict variable allowlist; no
+code evaluation, HTML rendering, or external resource loading occurs. SMTP is not enabled by
+default and is disabled entirely in test mode.
 
 ## Retrieval corpus and embeddings
 
@@ -222,7 +397,32 @@ that now close those paths.
 - Questions, turns, evidence, assessments, and competency state remain interview children.
   Report generation and export require an authorized interview and organization context; the
   report service also scopes persisted data by candidate, interview, and organization.
-- The worker task module is currently empty. No queued report or interview workflow was found.
+- The worker task module remains empty. No queued report or interview workflow was found.
+- Recruitment campaign execution uses a standalone database-polling worker
+  (`python -m services.recruitment_campaign_worker run`), not Celery or Redis. It scans
+  approved campaigns, creates one persisted execution per campaign, and claims due work with
+  the existing conditional lease update. The `g14_recruitment_campaign_dispatcher` migration
+  adds a durable retry availability time and a singleton pause/heartbeat control row.
+- Worker controls are local operational commands, not campaign-user APIs:
+  `python -m services.recruitment_campaign_worker pause|resume|status`. `status` reports the
+  last heartbeat, execution counts, due retries, and expired leases. Pause prevents both
+  background dispatch and API-triggered execution; requests remain persisted as pending.
+  SIGINT/SIGTERM stop new dispatch and wait for in-flight tasks; unfinished leases expire for
+  recovery.
+- Start after applying migrations with `python -m alembic upgrade head`, then run
+  `python -m services.recruitment_campaign_worker run`. Configure
+  `CAMPAIGN_WORKER_CONCURRENCY` (per process, 1-32) and
+  `CAMPAIGN_WORKER_POLL_SECONDS` (0-60 seconds) through the environment. The Compose worker
+  uses the same command and has a heartbeat-backed health check.
+- Retryable failures use three total attempts with exponential delays (default 5s then 10s,
+  capped at 300s). Permanent failures and exhausted retries enter `needs_attention`.
+- Dispatch is at-least-once. Database claims prevent concurrent active processing and result
+  plus campaign-artifact persistence is transactional and idempotent. A crash before commit can
+  repeat a provider call after lease expiry; Job Design has no external side effects, but a paid
+  LLM request may be duplicated. No exactly-once provider-call guarantee is made.
+- Redis availability is not required by the campaign worker. Database outages are logged and
+  retried at the bounded polling interval; worker status becomes unhealthy when its heartbeat
+  goes stale.
 - `rag_documents.organization_id` remains optional retrieval metadata, not an authorization
   boundary by itself. The application supplies verified tenant context and persisted interview
   scope; explicitly global rows remain shareable.

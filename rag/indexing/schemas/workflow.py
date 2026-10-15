@@ -4,7 +4,7 @@ from datetime import datetime
 from typing import Optional
 from uuid import UUID
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from .chunk import ConversationTurn
 from .review import SkillAssessment
@@ -57,6 +57,8 @@ class InterviewCreate(BaseModel):
 class InterviewResponse(BaseModel):
     """Interview response payload."""
 
+    model_config = ConfigDict(from_attributes=True)
+
     id: UUID
     candidate_id: UUID
     position: str
@@ -65,6 +67,3 @@ class InterviewResponse(BaseModel):
     created_at: datetime
     started_at: Optional[datetime] = None
     ended_at: Optional[datetime] = None
-
-    class Config:
-        from_attributes = True

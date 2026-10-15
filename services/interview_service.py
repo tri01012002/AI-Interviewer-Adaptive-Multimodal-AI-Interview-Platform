@@ -27,7 +27,16 @@ from infrastructure.distributed_lock import (
 from infrastructure.redis_store import RedisClient, RedisStore
 from integrations.llm_providers.provider import LLMProviderError, provider_from_settings
 from rag.service import RAGQuestionService
-from services.database import CandidateRecord, SessionLocal
+from services.database import (
+    CandidateRecord,
+    InterviewRecord,
+    InterviewScheduleRecord,
+    RecruitmentApplicationRecord,
+    RecruitmentCampaignHiringOutcomeRecord,
+    RecruitmentCampaignRecord,
+    SessionLocal,
+)
+from services.recruitment_campaign_service import RecruitmentCampaignService
 from services.repositories import (
     EvaluationRepository,
     InterviewRepository,
@@ -47,6 +56,10 @@ class InterviewForbiddenError(PermissionError):
 
 class InterviewConflictError(RuntimeError):
     """Raised when a turn ID is reused with a different answer payload."""
+
+
+class CampaignInterviewNotReadyError(RuntimeError):
+    """Raised when a campaign interview is not eligible to start."""
 
 
 class InterviewProcessingError(RuntimeError):
@@ -158,6 +171,204 @@ class InterviewService:
             self.interviews.create(
                 session, state, candidate.owner_user_id, organization_id
             )
+        return state
+
+    def start_campaign_interview(
+        self,
+        campaign_id: str,
+        application_id: str,
+        schedule_id: str,
+        mode: str = "text",
+        owner_user_id: str | None = None,
+        owner_role: str = "candidate",
+        organization_id: str | None = None,
+    ) -> dict[str, Any]:
+        if (
+            not organization_id
+            or owner_role != "candidate"
+            or not owner_user_id
+        ):
+            raise InterviewNotFoundError(application_id)
+
+        try:
+            with SessionLocal.begin() as session:
+                candidate, campaign = self._campaign_interview_target(
+                    session,
+                    campaign_id=campaign_id,
+                    application_id=application_id,
+                    schedule_id=schedule_id,
+                    owner_user_id=owner_user_id,
+                    organization_id=organization_id,
+                )
+                existing = session.execute(
+                    select(InterviewRecord).where(
+                        InterviewRecord.organization_id == organization_id,
+                        InterviewRecord.campaign_id == campaign_id,
+                        InterviewRecord.application_id == application_id,
+                    )
+                ).scalar_one_or_none()
+                if existing is not None:
+                    if existing.schedule_id != schedule_id:
+                        raise CampaignInterviewNotReadyError(
+                            "Application already has an interview linked to another schedule"
+                        )
+                    return self._state(existing)
+                state = self._campaign_interview_state(
+                    candidate_id=candidate.id,
+                    campaign=campaign,
+                    application_id=application_id,
+                    schedule_id=schedule_id,
+                    mode=mode,
+                    organization_id=organization_id,
+                )
+                self.interviews.create(
+                    session, state, candidate.owner_user_id, organization_id
+                )
+                return state
+        except IntegrityError as exc:
+            with SessionLocal() as session:
+                existing = session.execute(
+                    select(InterviewRecord).where(
+                        InterviewRecord.organization_id == organization_id,
+                        InterviewRecord.campaign_id == campaign_id,
+                        InterviewRecord.application_id == application_id,
+                    )
+                ).scalar_one_or_none()
+                if existing is None:
+                    raise
+                if existing.schedule_id != schedule_id:
+                    raise CampaignInterviewNotReadyError(
+                        "Application already has an interview linked to another schedule"
+                    ) from exc
+                return self._state(existing)
+
+    def _campaign_interview_target(
+        self,
+        session,
+        *,
+        campaign_id: str,
+        application_id: str,
+        schedule_id: str,
+        owner_user_id: str,
+        organization_id: str,
+    ) -> tuple[CandidateRecord, RecruitmentCampaignRecord]:
+        application = session.execute(
+            select(RecruitmentApplicationRecord).where(
+                RecruitmentApplicationRecord.id == application_id,
+                RecruitmentApplicationRecord.campaign_id == campaign_id,
+                RecruitmentApplicationRecord.organization_id == organization_id,
+            )
+        ).scalar_one_or_none()
+        campaign = session.execute(
+            select(RecruitmentCampaignRecord).where(
+                RecruitmentCampaignRecord.id == campaign_id,
+                RecruitmentCampaignRecord.organization_id == organization_id,
+            )
+        ).scalar_one_or_none()
+        if application is None or campaign is None:
+            raise InterviewNotFoundError(application_id)
+        if not RecruitmentCampaignService.approval_is_current(campaign):
+            raise CampaignInterviewNotReadyError("Campaign approval is no longer current")
+        if application.status != "needs_review" or application.review_status != "reviewed":
+            raise CampaignInterviewNotReadyError(
+                "Application screening must be reviewed before interviewing"
+            )
+        candidate = session.execute(
+            select(CandidateRecord).where(
+                CandidateRecord.id == application.candidate_id,
+                CandidateRecord.organization_id == organization_id,
+                CandidateRecord.user_id == owner_user_id,
+            )
+        ).scalar_one_or_none()
+        if candidate is None or not self.interviews.can_manage_candidate(
+            session,
+            application.candidate_id,
+            owner_user_id,
+            "candidate",
+            organization_id,
+        ):
+            raise InterviewNotFoundError(application_id)
+        schedule = session.execute(
+            select(InterviewScheduleRecord.id).where(
+                InterviewScheduleRecord.id == schedule_id,
+                InterviewScheduleRecord.organization_id == organization_id,
+                InterviewScheduleRecord.campaign_id == campaign_id,
+                InterviewScheduleRecord.application_id == application_id,
+                InterviewScheduleRecord.candidate_id == candidate.id,
+                InterviewScheduleRecord.status == "confirmed_internal",
+            )
+        ).scalar_one_or_none()
+        if schedule is None:
+            raise CampaignInterviewNotReadyError(
+                "A confirmed internal schedule is required"
+            )
+        has_outcome = session.execute(
+            select(RecruitmentCampaignHiringOutcomeRecord.id).where(
+                RecruitmentCampaignHiringOutcomeRecord.organization_id
+                == organization_id,
+                RecruitmentCampaignHiringOutcomeRecord.campaign_id == campaign_id,
+                RecruitmentCampaignHiringOutcomeRecord.application_id == application_id,
+            )
+        ).scalar_one_or_none()
+        if has_outcome is not None:
+            raise CampaignInterviewNotReadyError(
+                "Application already has a recorded hiring outcome"
+            )
+        return candidate, campaign
+
+    def _campaign_interview_state(
+        self,
+        *,
+        candidate_id: str,
+        campaign: RecruitmentCampaignRecord,
+        application_id: str,
+        schedule_id: str,
+        mode: str,
+        organization_id: str,
+    ) -> dict[str, Any]:
+        objective = RecruitmentCampaignService._objective(campaign)
+        position = " ".join(
+            part for part in (objective.seniority, objective.requested_role) if part
+        )
+        if not position:
+            raise CampaignInterviewNotReadyError(
+                "Approved campaign objective does not specify a role"
+            )
+        rubric_snapshot = json.loads(campaign.competency_rubric_json or "[]")
+        competencies = list(
+            dict.fromkeys(
+                criterion["competency"]
+                for criterion in rubric_snapshot
+                if isinstance(criterion, dict)
+                and isinstance(criterion.get("competency"), str)
+                and criterion["competency"].strip()
+            )
+        )
+        if not competencies:
+            raise CampaignInterviewNotReadyError(
+                "Approved campaign rubric does not specify interview competencies"
+            )
+        state = self.agent.start_interview(
+            candidate_id=candidate_id,
+            position=position,
+            competencies=competencies,
+        )
+        now = datetime.now(UTC).isoformat()
+        state.update(
+            {
+                "interview_id": str(uuid4()),
+                "mode": mode,
+                "organization_id": organization_id,
+                "created_at": now,
+                "updated_at": now,
+                "campaign_id": campaign.id,
+                "application_id": application_id,
+                "schedule_id": schedule_id,
+                "objective_version": campaign.objective_version,
+                "plan_version": campaign.plan_version,
+                "rubric_snapshot": rubric_snapshot,
+            }
+        )
         return state
 
     def get_interview(
@@ -351,7 +562,16 @@ class InterviewService:
                     or state.get("current_competency")
                     or "general"
                 )
-                rubric = Rubric(competency=target_competency)
+                campaign_criteria = [
+                    criterion
+                    for criterion in state.get("rubric_snapshot", [])
+                    if isinstance(criterion, dict)
+                    and criterion.get("competency") == target_competency
+                ]
+                rubric = Rubric(
+                    competency=target_competency,
+                    campaign_criteria=campaign_criteria,
+                )
                 evaluation_context = EvaluationContext(
                     position=str(state.get("position", "")),
                     prior_answers=[

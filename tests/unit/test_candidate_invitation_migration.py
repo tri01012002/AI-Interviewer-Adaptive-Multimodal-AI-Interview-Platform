@@ -3,7 +3,7 @@ from pathlib import Path
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, inspect, text
 
 from alembic import command
 from alembic.config import Config
@@ -75,6 +75,54 @@ def test_candidate_invitation_migration_preserves_legacy_profiles(monkeypatch):
             revision = connection.execute(
                 text("SELECT version_num FROM alembic_version")
             ).scalar_one()
+        execution_columns = {
+            column["name"]
+            for column in inspect(engine).get_columns("recruitment_campaign_executions")
+        }
+        campaign_columns = {
+            column["name"] for column in inspect(engine).get_columns("recruitment_campaigns")
+        }
+        worker_control_tables = set(inspect(engine).get_table_names())
+        communication_columns = {
+            column["name"] for column in inspect(engine).get_columns("candidate_communications")
+        }
+        communication_unique_constraints = {
+            constraint["name"]
+            for constraint in inspect(engine).get_unique_constraints("candidate_communications")
+        }
+        communication_foreign_keys = {
+            tuple(constraint["constrained_columns"])
+            for constraint in inspect(engine).get_foreign_keys("candidate_communications")
+        }
+        availability_uniques = {
+            constraint["name"]
+            for constraint in inspect(engine).get_unique_constraints(
+                "candidate_availability_submissions"
+            )
+        }
+        availability_indexes = {
+            index["name"]
+            for index in inspect(engine).get_indexes("candidate_availability_requests")
+        }
+        schedule_indexes = {
+            index["name"] for index in inspect(engine).get_indexes("interview_schedules")
+        }
+        schedule_checks = {
+            constraint["name"]
+            for constraint in inspect(engine).get_check_constraints("interview_schedules")
+        }
+        schedule_foreign_keys = {
+            (constraint["name"], tuple(constraint["constrained_columns"]))
+            for constraint in inspect(engine).get_foreign_keys("interview_schedules")
+        }
+        availability_foreign_keys = {
+            tuple(constraint["constrained_columns"])
+            for constraint in inspect(engine).get_foreign_keys("candidate_availability_requests")
+        }
+        application_unique_constraints = {
+            constraint["name"]
+            for constraint in inspect(engine).get_unique_constraints("recruitment_applications")
+        }
 
         assert candidate == (
             "legacy-profile",
@@ -86,7 +134,98 @@ def test_candidate_invitation_migration_preserves_legacy_profiles(monkeypatch):
         )
         assert verified_at is None
         assert invitation_count == 0
-        assert revision == "d3f7_tenant_isolation"
+        assert revision == "g20_campaign_interview_linkage"
+        version_column = next(
+            column
+            for column in inspect(engine).get_columns("alembic_version")
+            if column["name"] == "version_num"
+        )
+        assert "128" in str(version_column["type"])
+        assert {
+            "campaign_id",
+            "organization_id",
+            "status",
+            "lease_expires_at",
+            "available_at",
+        } <= execution_columns
+        assert {
+            "recruitment_campaign_worker_control",
+            "recruitment_applications",
+            "candidate_cv_documents",
+            "candidate_screenings",
+            "candidate_criterion_assessments",
+            "candidate_communications",
+            "candidate_communication_events",
+            "candidate_availability_requests",
+            "candidate_availability_responses",
+            "candidate_availability_submissions",
+            "candidate_availability_events",
+            "interview_schedules",
+            "interview_schedule_reservations",
+            "interview_schedule_events",
+            "interview_schedule_mutex",
+        } <= worker_control_tables
+        assert {
+            "uq_interview_schedules_confirmed_application",
+            "uq_interview_schedules_pending_replacement",
+            "ix_interview_schedules_expiration",
+            "ix_interview_schedules_campaign",
+        } <= schedule_indexes
+        assert {
+            "ck_interview_schedules_status",
+            "ck_interview_schedules_duration",
+            "ck_interview_schedules_interval",
+            "ck_interview_schedules_version",
+        } <= schedule_checks
+        assert (
+            "fk_interview_schedules_application",
+            ("organization_id", "campaign_id", "application_id", "candidate_id"),
+        ) in schedule_foreign_keys
+        assert (
+            "fk_interview_schedules_availability",
+            ("organization_id", "availability_request_id", "application_id", "candidate_id"),
+        ) in schedule_foreign_keys
+        assert "uq_candidate_availability_submissions_idempotency" in availability_uniques
+        assert {
+            "ix_candidate_availability_requests_expiration",
+            "ix_candidate_availability_requests_campaign",
+        } <= availability_indexes
+        assert (
+            "organization_id",
+            "campaign_id",
+            "application_id",
+            "candidate_id",
+        ) in availability_foreign_keys
+        assert "uq_recruitment_applications_org_campaign_id_candidate" in (
+            application_unique_constraints
+        )
+        assert {
+            "organization_id",
+            "campaign_id",
+            "application_id",
+            "idempotency_key",
+            "recipient_email",
+            "template_snapshot_json",
+            "approved_by_user_id",
+            "attempt_count",
+            "lease_token",
+            "delivery_status",
+        } <= communication_columns
+        assert "uq_candidate_communications_idempotency" in (communication_unique_constraints)
+        assert ("organization_id", "campaign_id", "application_id") in (communication_foreign_keys)
+        assert {
+            "approval_decided_by_user_id",
+            "approval_decided_at",
+            "objective_json",
+            "objective_version",
+            "plan_version",
+            "approved_objective_version",
+            "approved_plan_version",
+        } <= campaign_columns
+        assert {
+            "recruitment_campaign_approvals",
+            "recruitment_campaign_hiring_outcomes",
+        } <= worker_control_tables
     finally:
         if engine is not None:
             engine.dispose()
@@ -177,14 +316,9 @@ def test_tenant_downgrade_refuses_to_discard_tenant_and_support_audit_data(monke
 
         with engine.begin() as connection:
             connection.execute(
-                text(
-                    "DELETE FROM organization_memberships "
-                    "WHERE id = 'tenant-a-admin'"
-                )
+                text("DELETE FROM organization_memberships " "WHERE id = 'tenant-a-admin'")
             )
-            connection.execute(
-                text("DELETE FROM organizations WHERE id = 'tenant-a'")
-            )
+            connection.execute(text("DELETE FROM organizations WHERE id = 'tenant-a'"))
             connection.execute(
                 text(
                     "INSERT INTO access_audit "
