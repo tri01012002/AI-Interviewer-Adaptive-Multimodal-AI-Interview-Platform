@@ -6,6 +6,10 @@
 **Auditor:** Principal AI Engineer / Production Software Architect  
 **Status:** ⚠️ MVP-ONLY, NOT PRODUCTION-READY
 
+> Historical snapshot from 2026-09-02. The implementation statuses below predate later work and
+> are not current; use [docs/BACKEND_READINESS.md](docs/BACKEND_READINESS.md) for the latest
+> verified backend status and remaining readiness gaps.
+
 ---
 
 ## Executive Summary
@@ -828,4 +832,3 @@ Request B: Client retries same request
 
 **Report Generated:** 2026-09-02  
 **Audit Status:** ✅ COMPLETE
-

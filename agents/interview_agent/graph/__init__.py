@@ -55,6 +55,7 @@ class InterviewGraphState(TypedDict, total=False):
     turn_id: str
     candidate_answer: str
     current_question: str
+    question_source: str
     conversation_history: list[dict[str, Any]]
     competency_state: dict[str, dict[str, Any]]
     extracted_evidence: AnswerAnalysis
@@ -140,12 +141,23 @@ class InterviewAgentCore:
         self._context_retriever = context_retriever
         self.graph = self._build_graph()
 
-    def start_interview(self, candidate_id: str, position: str) -> dict[str, Any]:
-        require_agent(self.agent_id, "interview-agent")
+    def start_interview(
+        self,
+        candidate_id: str,
+        position: str,
+        competencies: list[str] | None = None,
+    ) -> dict[str, Any]:
+        planned_competencies = competencies or [
+            "python",
+            "pytorch",
+            "computer_vision",
+            "distributed_systems",
+        ]
         return {
             "candidate_id": candidate_id,
             "position": position,
             "current_question": self._intro_question,
+            "question_source": "deterministic",
             "questions_asked": [self._intro_question],
             "skills": {},
             "history": [],
@@ -155,9 +167,9 @@ class InterviewAgentCore:
             "follow_up_questions": [],
             "mode": "text",
             "difficulty": "medium",
-            "current_competency": "general",
+            "current_competency": competencies[0] if competencies else "general",
             "interview_plan": {
-                "competencies": ["python", "pytorch", "computer_vision", "distributed_systems"],
+                "competencies": planned_competencies,
                 "question_budget": settings.DEFAULT_NUM_QUESTIONS,
                 "duration_seconds": settings.DEFAULT_INTERVIEW_DURATION,
             },
@@ -209,6 +221,7 @@ class InterviewAgentCore:
         updated["skills"] = result["competency_state"]
         updated["history"] = [*state.get("history", []), {"answer": answer, "analysis": analysis.model_dump()}]
         updated["current_question"] = proposal.question
+        updated["question_source"] = result.get("question_source", "deterministic")
         previous_questions = list(state.get("questions_asked", []))
         if decision.action != "FINISH" and proposal.question not in previous_questions:
             previous_questions.append(proposal.question)
@@ -556,7 +569,12 @@ class InterviewAgentCore:
                 )
                 if question.competency != decision.competency or question.difficulty != difficulty:
                     raise LLMProviderError("question output did not match validated decision")
-                return {"generated_question": question}
+                return {
+                    "generated_question": question,
+                    "question_source": str(
+                        getattr(self._llm_provider, "provider_name", "custom")
+                    ),
+                }
             except (LLMProviderError, ValidationError, ValueError, TypeError, TimeoutError) as exc:
                 return {
                     "generated_question": QuestionProposal(
@@ -566,6 +584,7 @@ class InterviewAgentCore:
                         intent=decision.rationale,
                         expected_evidence=state.get("identified_gaps", []),
                     ),
+                    "question_source": "deterministic_fallback",
                     "errors": [f"question generation fallback: {exc.__class__.__name__}"],
                 }
         question = QuestionProposal(
@@ -575,7 +594,7 @@ class InterviewAgentCore:
             intent=decision.rationale,
             expected_evidence=state.get("identified_gaps", []),
         )
-        return {"generated_question": question}
+        return {"generated_question": question, "question_source": "deterministic"}
 
     @staticmethod
     def _question_system_prompt() -> str:

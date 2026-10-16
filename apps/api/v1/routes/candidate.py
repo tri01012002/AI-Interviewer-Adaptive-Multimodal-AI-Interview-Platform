@@ -7,6 +7,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from services.auth_service import current_user
 from services.candidate_store import CandidateStore
+from services.tenant_authorization import TenantContext, tenant_context
 
 router = APIRouter()
 _current_user = Depends(current_user)
@@ -30,40 +31,50 @@ class CandidateUpdate(BaseModel):
 
 
 @router.get("/candidates", tags=["Candidate"])
-async def list_candidates(user=_current_user):
-    return CandidateStore.list(user["id"], user["role"])
+async def list_candidates(
+    context: TenantContext = Depends(tenant_context),
+):
+    return CandidateStore.list(
+        context.actor_user_id, context.role, context.organization_id
+    )
 
 
 @router.post("/candidates", tags=["Candidate"])
 async def create_candidate(payload: CandidatePayload, user=_current_user):
-    if user["role"] not in {"admin", "recruiter", "candidate"}:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not permitted")
-    if (
-        user["role"] == "candidate"
-        and payload.email.strip().lower() != user["sub"].strip().lower()
-    ):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Candidate email must match the authenticated account",
-        )
-    try:
-        return CandidateStore.create(payload.model_dump(), user["id"], user["role"])
-    except ValueError as exc:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    raise HTTPException(
+        status_code=status.HTTP_409_CONFLICT,
+        detail="Candidate profiles are created through candidate-invitation redemption",
+    )
 
 
 @router.get("/candidates/{candidate_id}", tags=["Candidate"])
-async def get_candidate(candidate_id: str, user=_current_user):
-    candidate = CandidateStore.get(candidate_id, user["id"], user["role"])
+async def get_candidate(
+    candidate_id: str,
+    context: TenantContext = Depends(tenant_context),
+):
+    candidate = CandidateStore.get(
+        candidate_id,
+        context.actor_user_id,
+        context.role,
+        context.organization_id,
+    )
     if candidate is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Candidate not found")
     return candidate
 
 
 @router.patch("/candidates/{candidate_id}", tags=["Candidate"])
-async def update_candidate(candidate_id: str, payload: CandidateUpdate, user=_current_user):
+async def update_candidate(
+    candidate_id: str,
+    payload: CandidateUpdate,
+    context: TenantContext = Depends(tenant_context),
+):
     candidate = CandidateStore.update(
-        candidate_id, payload.model_dump(exclude_unset=True), user["id"], user["role"]
+        candidate_id,
+        payload.model_dump(exclude_unset=True),
+        context.actor_user_id,
+        context.role,
+        context.organization_id,
     )
     if candidate is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Candidate not found")
@@ -71,7 +82,15 @@ async def update_candidate(candidate_id: str, payload: CandidateUpdate, user=_cu
 
 
 @router.delete("/candidates/{candidate_id}", tags=["Candidate"])
-async def delete_candidate(candidate_id: str, user=_current_user):
-    if not CandidateStore.delete(candidate_id, user["id"], user["role"]):
+async def delete_candidate(
+    candidate_id: str,
+    context: TenantContext = Depends(tenant_context),
+):
+    if not CandidateStore.delete(
+        candidate_id,
+        context.actor_user_id,
+        context.role,
+        context.organization_id,
+    ):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Candidate not found")
     return {"deleted": True, "candidate_id": candidate_id}

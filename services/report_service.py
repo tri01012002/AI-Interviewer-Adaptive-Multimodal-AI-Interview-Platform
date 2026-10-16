@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -29,12 +31,22 @@ class ReportService:
         self._session_factory = session_factory or SessionLocal
 
     def build_report(
-        self, candidate_id: str, interview_id: str, state: dict[str, Any] | None = None
+        self,
+        candidate_id: str,
+        interview_id: str,
+        state: dict[str, Any] | None = None,
+        organization_id: str | None = None,
     ) -> dict[str, Any]:
         del state
+        if not organization_id:
+            raise LookupError("Persisted interview not found")
         with self._session_factory() as session:
             interview = session.get(InterviewRecord, interview_id)
-            if interview is None or interview.candidate_id != candidate_id:
+            if (
+                interview is None
+                or interview.candidate_id != candidate_id
+                or interview.organization_id != organization_id
+            ):
                 raise LookupError("Persisted interview not found")
 
             persisted_state = json.loads(interview.state_json)
@@ -169,6 +181,20 @@ class ReportService:
             "candidate_id": interview.candidate_id,
             "interview_id": interview.id,
             "position": interview.position,
+            "campaign": (
+                None
+                if interview.campaign_id is None
+                else {
+                    "campaign_id": interview.campaign_id,
+                    "application_id": interview.application_id,
+                    "schedule_id": interview.schedule_id,
+                    "objective_version": interview.objective_version,
+                    "plan_version": interview.plan_version,
+                    "rubric_snapshot": json.loads(
+                        interview.rubric_snapshot_json or "[]"
+                    ),
+                }
+            ),
             "completion_status": persisted_state.get("status", "unknown"),
             "is_final": is_final,
             "evaluation_status": evaluation_status,
@@ -205,16 +231,51 @@ class ReportService:
         }
 
     def export_report(
-        self, candidate_id: str, interview_id: str, state: dict[str, Any], format: str = "json"
+        self,
+        candidate_id: str,
+        interview_id: str,
+        state: dict[str, Any],
+        organization_id: str,
+        format: str = "json",
     ) -> str:
         if format not in {"json", "txt"}:
             raise ValueError("Report format must be 'json' or 'txt'")
-        report = self.build_report(candidate_id, interview_id, state)
+        report = self.build_report(
+            candidate_id,
+            interview_id,
+            state,
+            organization_id=organization_id,
+        )
+        return self.write_report(report, format)
+
+    def write_report(self, report: dict[str, Any], format: str = "json") -> str:
+        if format not in {"json", "txt"}:
+            raise ValueError("Report format must be 'json' or 'txt'")
         output_path = self.output_dir / f"report_{uuid4()}.{format}"
-        if format == "json":
-            output_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
-        else:
-            output_path.write_text(_format_text_report(report), encoding="utf-8")
+        temporary_path: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                dir=self.output_dir,
+                prefix=".report-",
+                suffix=".tmp",
+                delete=False,
+            ) as temporary:
+                temporary_path = Path(temporary.name)
+                content = (
+                    json.dumps(report, indent=2)
+                    if format == "json"
+                    else _format_text_report(report)
+                )
+                temporary.write(content)
+                temporary.flush()
+                os.fsync(temporary.fileno())
+            os.replace(temporary_path, output_path)
+        except OSError:
+            if temporary_path is not None:
+                temporary_path.unlink(missing_ok=True)
+            raise
         return str(output_path)
 
 

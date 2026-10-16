@@ -18,6 +18,8 @@ from services.database import (
     InterviewQuestionRecord,
     InterviewRecord,
     InterviewTurnRecord,
+    OrganizationMembershipRecord,
+    OrganizationRecord,
 )
 from services.turn_state import validate_turn_transition
 
@@ -25,11 +27,28 @@ from services.turn_state import validate_turn_transition
 class InterviewRepository:
     """Persistence operations for interviews; transaction ownership stays with the caller."""
 
-    def create(self, session: Session, state: dict[str, Any], owner_user_id: str | None = None) -> InterviewRecord:
+    def create(
+        self,
+        session: Session,
+        state: dict[str, Any],
+        owner_user_id: str | None,
+        organization_id: str,
+    ) -> InterviewRecord:
         interview = InterviewRecord(
             id=state["interview_id"],
             owner_user_id=owner_user_id,
             candidate_id=state["candidate_id"],
+            organization_id=organization_id,
+            campaign_id=state.get("campaign_id"),
+            application_id=state.get("application_id"),
+            schedule_id=state.get("schedule_id"),
+            objective_version=state.get("objective_version"),
+            plan_version=state.get("plan_version"),
+            rubric_snapshot_json=(
+                None
+                if state.get("rubric_snapshot") is None
+                else json.dumps(state["rubric_snapshot"], separators=(",", ":"))
+            ),
             position=state["position"],
             mode=state.get("mode", "text"),
             current_question=state["current_question"],
@@ -51,70 +70,157 @@ class InterviewRepository:
         session.flush()
         return interview
 
-    def get(self, session: Session, interview_id: str) -> InterviewRecord | None:
-        return session.get(InterviewRecord, interview_id)
-
     def get_authorized(
-        self, session: Session, interview_id: str, user_id: str, role: str
+        self,
+        session: Session,
+        interview_id: str,
+        user_id: str,
+        role: str,
+        organization_id: str,
     ) -> InterviewRecord | None:
-        query = select(InterviewRecord).where(InterviewRecord.id == interview_id)
-        if role == "admin":
+        query = (
+            select(InterviewRecord)
+            .join(
+                OrganizationRecord,
+                OrganizationRecord.id == InterviewRecord.organization_id,
+            )
+            .where(
+                InterviewRecord.id == interview_id,
+                InterviewRecord.organization_id == organization_id,
+                OrganizationRecord.status == "active",
+            )
+        )
+        if role == "platform_admin":
             return session.execute(query).scalar_one_or_none()
         if role == "recruiter":
             query = (
                 query.join(CandidateRecord, CandidateRecord.id == InterviewRecord.candidate_id)
+                .join(
+                    OrganizationMembershipRecord,
+                    (OrganizationMembershipRecord.organization_id
+                     == InterviewRecord.organization_id)
+                    & (OrganizationMembershipRecord.user_id == user_id),
+                )
                 .where(
+                    CandidateRecord.organization_id == organization_id,
                     InterviewRecord.owner_user_id == user_id,
                     CandidateRecord.owner_user_id == user_id,
+                    OrganizationMembershipRecord.role == "recruiter",
+                    OrganizationMembershipRecord.status == "active",
                 )
             )
         elif role == "candidate":
             query = (
                 query.join(CandidateRecord, CandidateRecord.id == InterviewRecord.candidate_id)
-                .where(CandidateRecord.user_id == user_id)
+                .join(
+                    OrganizationMembershipRecord,
+                    (OrganizationMembershipRecord.organization_id
+                     == InterviewRecord.organization_id)
+                    & (OrganizationMembershipRecord.user_id == user_id),
+                )
+                .where(
+                    CandidateRecord.organization_id == organization_id,
+                    CandidateRecord.user_id == user_id,
+                    OrganizationMembershipRecord.role == "candidate",
+                    OrganizationMembershipRecord.status == "active",
+                )
             )
         else:
             return None
         return session.execute(query).scalar_one_or_none()
 
-    def list_authorized(self, session: Session, user_id: str, role: str) -> list[InterviewRecord]:
-        query = select(InterviewRecord).order_by(InterviewRecord.created_at.desc())
-        if role == "admin":
+    def list_authorized(
+        self, session: Session, user_id: str, role: str, organization_id: str
+    ) -> list[InterviewRecord]:
+        query = (
+            select(InterviewRecord)
+            .join(
+                OrganizationRecord,
+                OrganizationRecord.id == InterviewRecord.organization_id,
+            )
+            .where(InterviewRecord.organization_id == organization_id)
+            .where(OrganizationRecord.status == "active")
+            .order_by(InterviewRecord.created_at.desc())
+        )
+        if role == "platform_admin":
             pass
         elif role == "recruiter":
             query = (
                 query.join(CandidateRecord, CandidateRecord.id == InterviewRecord.candidate_id)
+                .join(
+                    OrganizationMembershipRecord,
+                    (OrganizationMembershipRecord.organization_id
+                     == InterviewRecord.organization_id)
+                    & (OrganizationMembershipRecord.user_id == user_id),
+                )
                 .where(
+                    CandidateRecord.organization_id == organization_id,
                     InterviewRecord.owner_user_id == user_id,
                     CandidateRecord.owner_user_id == user_id,
+                    OrganizationMembershipRecord.role == "recruiter",
+                    OrganizationMembershipRecord.status == "active",
                 )
             )
         elif role == "candidate":
             query = (
                 query.join(CandidateRecord, CandidateRecord.id == InterviewRecord.candidate_id)
-                .where(CandidateRecord.user_id == user_id)
+                .join(
+                    OrganizationMembershipRecord,
+                    (OrganizationMembershipRecord.organization_id
+                     == InterviewRecord.organization_id)
+                    & (OrganizationMembershipRecord.user_id == user_id),
+                )
+                .where(
+                    CandidateRecord.organization_id == organization_id,
+                    CandidateRecord.user_id == user_id,
+                    OrganizationMembershipRecord.role == "candidate",
+                    OrganizationMembershipRecord.status == "active",
+                )
             )
         else:
             return []
         return list(session.execute(query).scalars().all())
 
     @staticmethod
-    def can_manage_candidate(session: Session, candidate_id: str, user_id: str, role: str) -> bool:
-        if role == "admin":
-            return True
-        candidate = session.get(CandidateRecord, candidate_id)
+    def can_manage_candidate(
+        session: Session,
+        candidate_id: str,
+        user_id: str,
+        role: str,
+        organization_id: str,
+    ) -> bool:
+        query = (
+            select(CandidateRecord)
+            .join(
+                OrganizationRecord,
+                OrganizationRecord.id == CandidateRecord.organization_id,
+            )
+            .where(
+                CandidateRecord.id == candidate_id,
+                CandidateRecord.organization_id == organization_id,
+                OrganizationRecord.status == "active",
+            )
+        )
+        if role in {"recruiter", "candidate"}:
+            query = query.join(
+                OrganizationMembershipRecord,
+                (OrganizationMembershipRecord.organization_id
+                 == CandidateRecord.organization_id)
+                & (OrganizationMembershipRecord.user_id == user_id),
+            ).where(
+                OrganizationMembershipRecord.status == "active",
+                OrganizationMembershipRecord.role == role,
+            )
+        candidate = session.execute(query).scalar_one_or_none()
         if candidate is None:
             return False
+        if role == "platform_admin":
+            return True
         if role == "recruiter":
             return candidate.owner_user_id == user_id
         if role == "candidate":
             return candidate.user_id == user_id
         return False
-
-    def list(self, session: Session) -> list[InterviewRecord]:
-        return list(session.execute(
-            select(InterviewRecord).order_by(InterviewRecord.created_at.desc())
-        ).scalars().all())
 
     def save_state(
         self,

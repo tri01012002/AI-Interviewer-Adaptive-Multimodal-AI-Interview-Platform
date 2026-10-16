@@ -1,7 +1,9 @@
 from uuid import uuid4
 
+from fastapi.testclient import TestClient
 from sqlalchemy import select
 
+from apps.api.main import app
 from evaluation.service import (
     AssessmentStatus,
     CompetencyAssessment,
@@ -12,6 +14,10 @@ from evaluation.service import (
 )
 from services.database import InterviewAssessmentRecord, InterviewEvidenceRecord, SessionLocal
 from services.interview_service import InterviewService
+from tests.unit.tenant_test_utils import (
+    create_candidate_through_invitation,
+    create_tenant,
+)
 
 
 def test_empty_answer_is_not_assessed_not_zero_failure():
@@ -68,17 +74,27 @@ def test_interview_aggregation_does_not_turn_missing_competency_into_zero_assess
 
 
 def test_answer_persists_evidence_assessment_and_versioned_competency_state():
+    with TestClient(app) as client:
+        tenant = create_tenant(client)
+        candidate, _headers, profile, _invitation = (
+            create_candidate_through_invitation(client, tenant)
+        )
+
     service = InterviewService()
     state = service.start_interview(
-        f"evaluation-candidate-{uuid4()}",
+        profile["candidate_id"],
         "AI Engineer",
-        owner_role="admin",
+        owner_user_id=candidate["id"],
+        owner_role="candidate",
+        organization_id=tenant.organization_id,
     )
     service.submit_answer(
         state["interview_id"],
         "I implemented a Python API and reduced latency by 40%.",
         f"evaluation-turn-{uuid4()}",
-        role="admin",
+        candidate["id"],
+        "candidate",
+        tenant.organization_id,
     )
 
     with SessionLocal() as session:

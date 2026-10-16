@@ -3,6 +3,10 @@
 **Date:** 2026-09-02  
 **Status:** PARTIAL
 
+> Historical phase report from 2026-09-02. Provider behavior has since evolved; see
+> [docs/BACKEND_READINESS.md](docs/BACKEND_READINESS.md) for current offline defaults, explicit
+> mock-provider behavior, credential validation, and verification results.
+
 ## 1. Audit
 
 The repository had no LLM provider abstraction. The graph used a deterministic analyzer, evaluation
@@ -152,4 +156,3 @@ separation, and deterministic fallback behavior. Touched files report no diagnos
 but no live provider call was verified, no provider rate-limit/load test was run, and the default
 path remains deterministic when no key is configured. PostgreSQL and external deployment behavior
 remain unverified.
-

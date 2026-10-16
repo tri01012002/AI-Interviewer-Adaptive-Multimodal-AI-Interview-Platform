@@ -11,9 +11,25 @@ from integrations.llm_providers.provider import LLMTimeoutError
 from services.database import InterviewQuestionRecord, InterviewTurnRecord, SessionLocal
 from services.interview_service import InterviewProcessingError
 from services.user_store import UserStore
+from tests.unit.tenant_test_utils import (
+    create_candidate_through_invitation,
+    create_tenant,
+    start_interview,
+    tenant_headers,
+)
 
 TEST_ADMIN_EMAIL = "api-test-admin@example.test"
 TEST_ADMIN_PASSWORD = "api-test-only-password"
+
+
+def tenant_flow(client: TestClient):
+    tenant = create_tenant(client)
+    _candidate, candidate_headers, profile, _invitation = (
+        create_candidate_through_invitation(client, tenant)
+    )
+    return tenant, tenant_headers(candidate_headers, tenant.organization_id), profile[
+        "candidate_id"
+    ]
 
 
 @pytest.fixture
@@ -33,26 +49,31 @@ def auth_headers(client: TestClient) -> dict[str, str]:
 
 
 def test_start_interview_endpoint(client: TestClient):
+    tenant = create_tenant(client)
+    _candidate, _candidate_headers, profile, _invitation = (
+        create_candidate_through_invitation(client, tenant)
+    )
     response = client.post(
         "/api/v1/interview/start",
-        json={"candidate_id": "candidate-100", "position": "AI Engineer", "mode": "text"},
-        headers=auth_headers(client),
+        json={
+            "candidate_id": profile["candidate_id"],
+            "position": "AI Engineer",
+            "mode": "text",
+        },
+        headers=tenant_headers(tenant.recruiter_headers, tenant.organization_id),
     )
 
     assert response.status_code == 200
     payload = response.json()
-    assert payload["candidate_id"] == "candidate-100"
+    assert payload["candidate_id"] == profile["candidate_id"]
     assert payload["position"] == "AI Engineer"
     assert "introduce" in payload["current_question"].lower()
+    assert payload["question_source"] == "deterministic"
 
 
 def test_submit_answer_endpoint_updates_state_and_scores(client: TestClient):
-    start = client.post(
-        "/api/v1/interview/start",
-        json={"candidate_id": "candidate-200", "position": "AI Engineer", "mode": "text"},
-        headers=auth_headers(client),
-    )
-    interview_id = start.json()["interview_id"]
+    tenant, headers, candidate_id = tenant_flow(client)
+    interview_id = start_interview(client, tenant, candidate_id)["interview_id"]
 
     response = client.post(
         f"/api/v1/interview/{interview_id}/answer",
@@ -63,7 +84,7 @@ def test_submit_answer_endpoint_updates_state_and_scores(client: TestClient):
                 "I also deployed a model to production and optimized inference latency."
             ),
         },
-        headers=auth_headers(client),
+        headers=headers,
     )
 
     assert response.status_code == 200
@@ -71,16 +92,14 @@ def test_submit_answer_endpoint_updates_state_and_scores(client: TestClient):
     assert payload["skills"]["general"]["score"] >= 3
     assert payload["evaluation"]["assessment"]["competency"] == "general"
     assert payload["overall_score"] >= 0
+    assert payload["question_source"] == "deterministic"
+    persisted = client.get(f"/api/v1/interview/{interview_id}", headers=headers)
+    assert persisted.json()["question_source"] == "deterministic"
 
 
 def test_duplicate_turn_id_replays_without_appending_history(client: TestClient):
-    headers = auth_headers(client)
-    start = client.post(
-        "/api/v1/interview/start",
-        json={"candidate_id": "candidate-idempotent", "position": "AI Engineer", "mode": "text"},
-        headers=headers,
-    )
-    interview_id = start.json()["interview_id"]
+    tenant, headers, candidate_id = tenant_flow(client)
+    interview_id = start_interview(client, tenant, candidate_id)["interview_id"]
     request = {
         "turn_id": "turn-duplicate-1",
         "answer": "I deployed a Python service to production.",
@@ -96,14 +115,10 @@ def test_duplicate_turn_id_replays_without_appending_history(client: TestClient)
 
 
 def test_adaptive_graph_result_and_answered_question_are_persisted(client: TestClient):
-    headers = auth_headers(client)
-    start = client.post(
-        "/api/v1/interview/start",
-        json={"candidate_id": "candidate-graph-state", "position": "AI Engineer"},
-        headers=headers,
-    )
-    interview_id = start.json()["interview_id"]
-    first_question = start.json()["current_question"]
+    tenant, headers, candidate_id = tenant_flow(client)
+    start = start_interview(client, tenant, candidate_id)
+    interview_id = start["interview_id"]
+    first_question = start["current_question"]
     turn_id = f"turn-graph-state-{uuid4()}"
 
     response = client.post(
@@ -145,13 +160,8 @@ def test_interview_endpoints_require_authentication(client: TestClient):
 
 
 def test_evaluation_provider_failure_returns_retryable_service_error(client: TestClient, monkeypatch):
-    headers = auth_headers(client)
-    start = client.post(
-        "/api/v1/interview/start",
-        json={"candidate_id": "candidate-evaluation-retry", "position": "AI Engineer"},
-        headers=headers,
-    )
-    interview_id = start.json()["interview_id"]
+    tenant, headers, candidate_id = tenant_flow(client)
+    interview_id = start_interview(client, tenant, candidate_id)["interview_id"]
     request = {"turn_id": "turn-evaluation-retry", "answer": "I implemented a Python API."}
     original_evaluate = interview_service.evaluator.evaluate_result
     monkeypatch.setattr(
@@ -170,13 +180,8 @@ def test_evaluation_provider_failure_returns_retryable_service_error(client: Tes
 
 
 def test_processing_duplicate_returns_retryable_conflict(client: TestClient, monkeypatch):
-    headers = auth_headers(client)
-    start = client.post(
-        "/api/v1/interview/start",
-        json={"candidate_id": "candidate-processing", "position": "AI Engineer"},
-        headers=headers,
-    )
-    interview_id = start.json()["interview_id"]
+    tenant, headers, candidate_id = tenant_flow(client)
+    interview_id = start_interview(client, tenant, candidate_id)["interview_id"]
     monkeypatch.setattr(
         interview_service,
         "submit_answer",
