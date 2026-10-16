@@ -25,6 +25,7 @@ from services.database import (
     CandidateCommunicationRecord,
     CandidateRecord,
     RecruitmentApplicationRecord,
+    RecruitmentCampaignExecutionRecord,
     RecruitmentCampaignRecord,
     RecruitmentCampaignWorkerControlRecord,
     SessionLocal,
@@ -403,6 +404,13 @@ class CandidateCommunicationService:
                         RecruitmentCampaignRecord.organization_id
                         == CandidateCommunicationRecord.organization_id,
                         RecruitmentCampaignRecord.approval_state == "approved",
+                        ~exists().where(
+                            RecruitmentCampaignExecutionRecord.campaign_id
+                            == RecruitmentCampaignRecord.id,
+                            RecruitmentCampaignExecutionRecord.organization_id
+                            == RecruitmentCampaignRecord.organization_id,
+                            RecruitmentCampaignExecutionRecord.status == "completed",
+                        ),
                     ),
                 )
                 .values(
@@ -479,6 +487,13 @@ class CandidateCommunicationService:
                         RecruitmentCampaignRecord.organization_id
                         == CandidateCommunicationRecord.organization_id,
                         RecruitmentCampaignRecord.approval_state == "approved",
+                    ),
+                    ~exists().where(
+                        RecruitmentCampaignExecutionRecord.campaign_id
+                        == CandidateCommunicationRecord.campaign_id,
+                        RecruitmentCampaignExecutionRecord.organization_id
+                        == CandidateCommunicationRecord.organization_id,
+                        RecruitmentCampaignExecutionRecord.status == "completed",
                     ),
                 )
                 .values(
@@ -664,7 +679,7 @@ class CandidateCommunicationService:
             CandidateCommunicationRecord.available_at <= now,
         )
         with SessionLocal() as session:
-            return list(
+            communication_ids = list(
                 session.execute(
                     select(CandidateCommunicationRecord.id)
                     .join(
@@ -678,6 +693,13 @@ class CandidateCommunicationService:
                     )
                     .where(
                         RecruitmentCampaignRecord.approval_state == "approved",
+                        ~exists().where(
+                            RecruitmentCampaignExecutionRecord.campaign_id
+                            == RecruitmentCampaignRecord.id,
+                            RecruitmentCampaignExecutionRecord.organization_id
+                            == RecruitmentCampaignRecord.organization_id,
+                            RecruitmentCampaignExecutionRecord.status == "completed",
+                        ),
                         or_(
                             CandidateCommunicationRecord.status == "approved",
                             retry_due,
@@ -687,6 +709,30 @@ class CandidateCommunicationService:
                     .limit(limit)
                 ).scalars()
             )
+            return [
+                communication_id
+                for communication_id in communication_ids
+                if not cls._campaign_target_achieved(session, communication_id)
+            ]
+
+    @staticmethod
+    def _campaign_target_achieved(session, communication_id: str) -> bool:
+        campaign = session.execute(
+            select(RecruitmentCampaignRecord)
+            .join(
+                CandidateCommunicationRecord,
+                and_(
+                    CandidateCommunicationRecord.campaign_id
+                    == RecruitmentCampaignRecord.id,
+                    CandidateCommunicationRecord.organization_id
+                    == RecruitmentCampaignRecord.organization_id,
+                ),
+            )
+            .where(CandidateCommunicationRecord.id == communication_id)
+        ).scalar_one_or_none()
+        return campaign is not None and RecruitmentCampaignService.target_is_achieved(
+            session, campaign
+        )
 
     @classmethod
     def process_dispatched(
@@ -1487,7 +1533,11 @@ class CandidateCommunicationService:
             CandidateCommunicationEventRecord(
                 organization_id=communication.organization_id,
                 communication_id=communication.id,
-                actor_user_id=None if context is None else context.actor_user_id,
+                actor_user_id=(
+                    None
+                    if context is None or context.is_automated
+                    else context.actor_user_id
+                ),
                 event_type=event_type,
                 outcome=outcome,
                 attempt_number=attempt_number,
@@ -1506,7 +1556,7 @@ class CandidateCommunicationService:
     ) -> None:
         session.add(
             AccessAuditRecord(
-                actor_user_id=context.actor_user_id,
+                actor_user_id=None if context.is_automated else context.actor_user_id,
                 organization_id=communication.organization_id,
                 requested_organization_id=communication.organization_id,
                 action=action,

@@ -4,10 +4,11 @@ import json
 import socket
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from apps.api.main import app
 from config import settings
@@ -15,28 +16,32 @@ from services import email_provider
 from services.candidate_application_service import CandidateApplicationService
 from services.candidate_communication_service import CandidateCommunicationService
 from services.database import (
+    AccessAuditRecord,
+    CandidateAvailabilityEventRecord,
+    CandidateAvailabilityRequestRecord,
+    CandidateCommunicationEventRecord,
     CandidateCommunicationRecord,
     InterviewRecord,
+    InterviewScheduleEventRecord,
+    InterviewScheduleRecord,
     RecruitmentCampaignExecutionRecord,
     SessionLocal,
 )
 from services.recruitment_campaign_orchestrator import RecruitmentCampaignOrchestrator
+from services.recruitment_campaign_worker import RecruitmentCampaignWorker
 from services.report_service import ReportService
 from services.tenant_authorization import TenantContext
 from tests.unit.tenant_test_utils import (
     create_candidate_through_invitation,
+    create_tenant,
     tenant_headers,
 )
-from tests.unit.test_candidate_communications import draft_payload
 from tests.unit.test_interview_scheduling import (
-    _candidate_response,
     _confirm,
     _future_local_slots,
-    _proposal,
-    _submit,
 )
 from tests.unit.test_recruitment_candidate_intake import (
-    create_candidate_and_campaign,
+    create_approved_campaign,
     make_docx,
     submit_cv,
 )
@@ -48,13 +53,13 @@ def client():
         yield test_client
 
 
-def _prepare_candidate(
+def _prepare_candidate_with_worker(
     client: TestClient,
     tenant,
     campaign_id: str,
     candidate_headers: dict[str, str],
     *,
-    slot_offset_days: int = 0,
+    slot_index: int,
 ) -> tuple[str, str, dict]:
     uploaded = submit_cv(
         client,
@@ -67,7 +72,6 @@ def _prepare_candidate(
     application_id = uploaded.json()["id"]
     processed = CandidateApplicationService.process_dispatched(application_id)
     assert processed is not None and processed.status == "needs_review"
-
     reviewed = client.post(
         f"/api/v1/recruitment-applications/{application_id}/review",
         json={
@@ -79,62 +83,167 @@ def _prepare_candidate(
         headers=tenant_headers(tenant.org_admin_headers, tenant.organization_id),
     )
     assert reviewed.status_code == 200, reviewed.text
-    communication = client.post(
-        f"/api/v1/recruitment-applications/{application_id}/communications",
-        json=draft_payload(f"campaign-email-{application_id[:12]}"),
+
+    RecruitmentCampaignWorker().dispatch_once()
+    RecruitmentCampaignWorker().dispatch_once()
+    with SessionLocal() as session:
+        communication = session.execute(
+            select(CandidateCommunicationRecord).where(
+                CandidateCommunicationRecord.application_id == application_id,
+                CandidateCommunicationRecord.template_type == "interview_invitation",
+            )
+        ).scalar_one()
+        communication_id = communication.id
+        assert session.scalar(
+            select(func.count(CandidateAvailabilityRequestRecord.id)).where(
+                CandidateAvailabilityRequestRecord.application_id == application_id
+            )
+        ) == 0
+        assert session.scalar(
+            select(func.count(CandidateCommunicationRecord.id)).where(
+                CandidateCommunicationRecord.application_id == application_id,
+                CandidateCommunicationRecord.template_type == "interview_invitation",
+            )
+        ) == 1
+        draft_event = session.execute(
+            select(CandidateCommunicationEventRecord).where(
+                CandidateCommunicationEventRecord.communication_id
+                == communication_id,
+                CandidateCommunicationEventRecord.event_type
+                == "communication_draft_created",
+            )
+        ).scalar_one()
+        assert draft_event.actor_user_id is None
+    submitted = client.post(
+        f"/api/v1/candidate-communications/{communication_id}/submit",
         headers=tenant_headers(tenant.recruiter_headers, tenant.organization_id),
     )
-    assert communication.status_code == 201, communication.text
-    communication_id = communication.json()["id"]
-    for action, headers in (
-        ("submit", tenant.recruiter_headers),
-        ("approve", tenant.org_admin_headers),
-    ):
-        response = client.post(
-            f"/api/v1/candidate-communications/{communication_id}/{action}",
-            headers=tenant_headers(headers, tenant.organization_id),
-        )
-        assert response.status_code == 200, response.text
-
-    delivered = CandidateCommunicationService.process_dispatched(communication_id)
-    assert delivered is not None
-    assert delivered.status == "simulated"
-    assert delivered.delivery_status == "simulated"
-    assert delivered.sent_at is None
-
-    request_id = _candidate_response(
-        client,
-        tenant,
-        candidate_headers,
-        campaign_id,
-        application_id,
-        starts=[
-            item + timedelta(days=slot_offset_days)
-            for item in _future_local_slots()
-        ],
+    assert submitted.status_code == 200, submitted.text
+    RecruitmentCampaignWorker().dispatch_once()
+    with SessionLocal() as session:
+        pending_approval = session.get(CandidateCommunicationRecord, communication_id)
+        assert pending_approval is not None
+        assert pending_approval.status == "awaiting_approval"
+        assert session.scalar(
+            select(func.count(CandidateAvailabilityRequestRecord.id)).where(
+                CandidateAvailabilityRequestRecord.application_id == application_id
+            )
+        ) == 0
+    approved = client.post(
+        f"/api/v1/candidate-communications/{communication_id}/approve",
+        headers=tenant_headers(tenant.org_admin_headers, tenant.organization_id),
     )
-    proposal = _proposal(
-        client,
-        tenant,
-        campaign_id,
-        application_id,
-        request_id,
-        key=f"campaign-schedule-{application_id[:12]}",
-    )
-    assert proposal.status_code == 201, proposal.text
-    pending = _submit(client, tenant, proposal.json())
-    assert pending.status_code == 200, pending.text
+    assert approved.status_code == 200, approved.text
 
-    not_yet_confirmed = client.post(
-        f"/api/v1/interview/campaigns/{campaign_id}/applications/{application_id}/start",
-        json={"schedule_id": pending.json()["id"], "mode": "text"},
+    execution_id = _wake_execution(campaign_id)
+    reconciled = RecruitmentCampaignOrchestrator.run_dispatched(execution_id)
+    assert reconciled is not None and reconciled.status == "awaiting_progress"
+    RecruitmentCampaignWorker().dispatch_once()
+    with SessionLocal() as session:
+        request = session.execute(
+            select(CandidateAvailabilityRequestRecord).where(
+                CandidateAvailabilityRequestRecord.application_id == application_id
+            )
+        ).scalar_one()
+        assert session.scalar(
+            select(func.count(CandidateAvailabilityRequestRecord.id)).where(
+                CandidateAvailabilityRequestRecord.application_id == application_id
+            )
+        ) == 1
+        request_event = session.execute(
+            select(CandidateAvailabilityEventRecord).where(
+                CandidateAvailabilityEventRecord.request_id == request.id,
+                CandidateAvailabilityEventRecord.event_type == "request_created",
+            )
+        ).scalar_one()
+        assert request_event.actor_user_id is None
+        proposed_windows = json.loads(request.proposed_windows_json)
+    selected = proposed_windows[slot_index]
+    zone = ZoneInfo(request.timezone_name)
+    candidate_window = {
+        "start": datetime.fromisoformat(selected["start"])
+        .astimezone(zone)
+        .isoformat(),
+        "end": datetime.fromisoformat(selected["end"])
+        .astimezone(zone)
+        .isoformat(),
+    }
+    candidate_response = client.post(
+        f"/api/v1/candidate-availability-requests/{request.id}/responses",
+        json={
+            "idempotency_key": f"r53-candidate-response-{application_id[:16]}",
+            "timezone_name": request.timezone_name,
+            "windows": [candidate_window],
+        },
         headers=tenant_headers(candidate_headers, tenant.organization_id),
     )
-    assert not_yet_confirmed.status_code == 409
+    assert candidate_response.status_code == 200, candidate_response.text
+    reviewed_availability = client.post(
+        f"/api/v1/candidate-availability-requests/{request.id}/review",
+        json={"preferred_window_indices": [0]},
+        headers=tenant_headers(tenant.recruiter_headers, tenant.organization_id),
+    )
+    assert reviewed_availability.status_code == 200, reviewed_availability.text
 
-    confirmed = _confirm(client, tenant, pending.json())
+    advanced = RecruitmentCampaignWorker().dispatch_once()
+    schedule_action = next(
+        item
+        for item in advanced
+        if getattr(item, "action", None) == "schedule_submitted_for_confirmation"
+        and getattr(item, "application_id", None) == application_id
+    )
+    with SessionLocal() as session:
+        schedule = session.get(InterviewScheduleRecord, schedule_action.resulting_id)
+        assert schedule is not None and schedule.status == "pending_confirmation"
+        schedule_payload = {"id": schedule.id, "version": schedule.version}
+        schedule_events = session.execute(
+            select(InterviewScheduleEventRecord).where(
+                InterviewScheduleEventRecord.schedule_id == schedule.id,
+                InterviewScheduleEventRecord.event_type.in_(
+                    ("proposal_created", "submitted_for_confirmation")
+                ),
+            )
+        ).scalars().all()
+        assert len(schedule_events) == 2
+        assert all(event.actor_user_id is None for event in schedule_events)
+        automation_audits = session.execute(
+            select(AccessAuditRecord).where(
+                AccessAuditRecord.resource_id == schedule.id,
+                AccessAuditRecord.action.in_(
+                    ("interview_schedule_proposed", "interview_schedule_submitted")
+                ),
+            )
+        ).scalars().all()
+        assert len(automation_audits) == 2
+        assert all(audit.actor_user_id is None for audit in automation_audits)
+
+    replayed = RecruitmentCampaignWorker().dispatch_once()
+    assert not any(
+        getattr(item, "action", None) == "schedule_submitted_for_confirmation"
+        and getattr(item, "application_id", None) == application_id
+        for item in replayed
+    )
+    with SessionLocal() as session:
+        assert session.scalar(
+            select(func.count(InterviewScheduleRecord.id)).where(
+                InterviewScheduleRecord.application_id == application_id
+            )
+        ) == 1
+
+    confirmed = _confirm(
+        client,
+        tenant,
+        schedule_payload,
+        headers=tenant_headers(tenant.recruiter_headers, tenant.organization_id),
+    )
     assert confirmed.status_code == 200, confirmed.text
     assert confirmed.json()["status"] == "confirmed_internal"
+    with SessionLocal() as session:
+        assert session.scalar(
+            select(InterviewRecord.id).where(
+                InterviewRecord.application_id == application_id
+            )
+        ) is None
     return application_id, communication_id, confirmed.json()
 
 
@@ -246,8 +355,26 @@ def test_approved_campaign_recovers_across_intake_to_explicit_hiring_outcomes(
         lambda *args, **kwargs: pytest.fail("campaign test attempted a network connection"),
     )
 
-    tenant, _, first_headers, _, campaign_id = (
-        create_candidate_and_campaign(client)
+    tenant = create_tenant(client)
+    _, first_headers, _, _ = create_candidate_through_invitation(client, tenant)
+    policy_windows = _future_local_slots(count=2)
+    campaign_id = create_approved_campaign(
+        client,
+        tenant,
+        campaign_automation={
+            "response_deadline": (datetime.now(UTC) + timedelta(days=2)).isoformat(),
+            "interview_duration_minutes": 30,
+            "timezone_name": "Asia/Ho_Chi_Minh",
+            "proposed_windows": [
+                {
+                    "start": start.isoformat(),
+                    "end": (start + timedelta(minutes=30)).isoformat(),
+                }
+                for start in policy_windows
+            ],
+            "interviewer_user_id": tenant.recruiter["id"],
+            "exclusive_resources": [],
+        },
     )
     execution = RecruitmentCampaignOrchestrator.start(
         campaign_id,
@@ -259,11 +386,12 @@ def test_approved_campaign_recovers_across_intake_to_explicit_hiring_outcomes(
     )
     assert execution.status == "awaiting_progress"
 
-    first_application, first_communication, first_schedule = _prepare_candidate(
+    first_application, first_communication, first_schedule = _prepare_candidate_with_worker(
         client,
         tenant,
         campaign_id,
         first_headers,
+        slot_index=0,
     )
     first_interview, first_report = _complete_candidate_interview(
         client,
@@ -273,6 +401,9 @@ def test_approved_campaign_recovers_across_intake_to_explicit_hiring_outcomes(
         first_schedule,
         first_headers,
     )
+    execution_id = _wake_execution(campaign_id)
+    reconciled = RecruitmentCampaignOrchestrator.run_dispatched(execution_id)
+    assert reconciled is not None and reconciled.status == "awaiting_progress"
     assert first_report["campaign"]["rubric_snapshot"]
     with SessionLocal() as session:
         persisted_interview = session.execute(
@@ -294,6 +425,14 @@ def test_approved_campaign_recovers_across_intake_to_explicit_hiring_outcomes(
     assert before_hire.status_code == 200
     assert before_hire.json()["qualifying_hires"] == 0
     assert before_hire.json()["objective_status"] == "active"
+    first_progress = next(
+        item
+        for item in before_hire.json()["application_workflows"]
+        if item["application_id"] == first_application
+    )
+    assert first_progress["stage"] == "awaiting_hiring_decision"
+    assert first_progress["work_status"] == "pending"
+    assert first_progress["handoffs"]["waiting_on"] == "recruiter_or_authorized_reviewer"
 
     _record_hire(client, tenant, campaign_id, first_application)
     intermediate = client.get(
@@ -308,12 +447,12 @@ def test_approved_campaign_recovers_across_intake_to_explicit_hiring_outcomes(
     _, other_headers, _, _ = create_candidate_through_invitation(
         client, tenant
     )
-    second_application, second_communication, second_schedule = _prepare_candidate(
+    second_application, second_communication, second_schedule = _prepare_candidate_with_worker(
         client,
         tenant,
         campaign_id,
         other_headers,
-        slot_offset_days=1,
+        slot_index=1,
     )
     assert second_application != first_application
     second_interview, _ = _complete_candidate_interview(
@@ -326,6 +465,8 @@ def test_approved_campaign_recovers_across_intake_to_explicit_hiring_outcomes(
     )
     assert second_interview != first_interview
     _record_hire(client, tenant, campaign_id, second_application)
+    assert CandidateApplicationService.discover_eligible(10) == []
+    assert CandidateCommunicationService.discover_eligible(10) == []
 
     execution_id = _wake_execution(campaign_id)
     recovered = RecruitmentCampaignOrchestrator.run_dispatched(execution_id)

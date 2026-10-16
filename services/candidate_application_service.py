@@ -35,6 +35,7 @@ from services.database import (
     CandidateRecord,
     CandidateScreeningRecord,
     RecruitmentApplicationRecord,
+    RecruitmentCampaignExecutionRecord,
     RecruitmentCampaignRecord,
     RecruitmentCampaignWorkerControlRecord,
     SessionLocal,
@@ -348,7 +349,7 @@ class CandidateApplicationService:
             RecruitmentApplicationRecord.lease_expires_at <= now,
         )
         with SessionLocal() as session:
-            return list(
+            application_ids = list(
                 session.execute(
                     select(RecruitmentApplicationRecord.id)
                     .join(
@@ -367,6 +368,13 @@ class CandidateApplicationService:
                                 ("pending", "retryable_failure", "running")
                             ),
                         ),
+                        ~exists().where(
+                            RecruitmentCampaignExecutionRecord.campaign_id
+                            == RecruitmentCampaignRecord.id,
+                            RecruitmentCampaignExecutionRecord.organization_id
+                            == RecruitmentCampaignRecord.organization_id,
+                            RecruitmentCampaignExecutionRecord.status == "completed",
+                        ),
                         or_(
                             RecruitmentApplicationRecord.status == "pending",
                             due,
@@ -379,6 +387,30 @@ class CandidateApplicationService:
                     .limit(limit)
                 ).scalars()
             )
+            return [
+                application_id
+                for application_id in application_ids
+                if not cls._campaign_target_achieved(session, application_id)
+            ]
+
+    @staticmethod
+    def _campaign_target_achieved(session, application_id: str) -> bool:
+        campaign = session.execute(
+            select(RecruitmentCampaignRecord)
+            .join(
+                RecruitmentApplicationRecord,
+                and_(
+                    RecruitmentApplicationRecord.campaign_id
+                    == RecruitmentCampaignRecord.id,
+                    RecruitmentApplicationRecord.organization_id
+                    == RecruitmentCampaignRecord.organization_id,
+                ),
+            )
+            .where(RecruitmentApplicationRecord.id == application_id)
+        ).scalar_one_or_none()
+        return campaign is not None and RecruitmentCampaignService.target_is_achieved(
+            session, campaign
+        )
 
     @classmethod
     def process_dispatched(cls, application_id: str) -> ApplicationResponse | None:
@@ -414,6 +446,19 @@ class CandidateApplicationService:
             )
             if control is not None and control.paused:
                 return None
+            campaign = session.execute(
+                select(RecruitmentCampaignRecord).where(
+                    RecruitmentCampaignRecord.id == target.campaign_id,
+                    RecruitmentCampaignRecord.organization_id
+                    == target.organization_id,
+                )
+            ).scalar_one_or_none()
+            if (
+                campaign is not None
+                and campaign.approval_state == "approved"
+                and RecruitmentCampaignService.target_is_achieved(session, campaign)
+            ):
+                return None
             claim_time = datetime.now(UTC)
             claim = session.execute(
                 update(RecruitmentApplicationRecord)
@@ -440,6 +485,13 @@ class CandidateApplicationService:
                         RecruitmentCampaignRecord.organization_id
                         == RecruitmentApplicationRecord.organization_id,
                         RecruitmentCampaignRecord.approval_state == "approved",
+                    ),
+                    ~exists().where(
+                        RecruitmentCampaignExecutionRecord.campaign_id
+                        == RecruitmentApplicationRecord.campaign_id,
+                        RecruitmentCampaignExecutionRecord.organization_id
+                        == RecruitmentApplicationRecord.organization_id,
+                        RecruitmentCampaignExecutionRecord.status == "completed",
                     ),
                     ~exists().where(
                         RecruitmentCampaignWorkerControlRecord.id

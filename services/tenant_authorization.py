@@ -18,6 +18,7 @@ class TenantContext:
     role: str
     is_platform_admin: bool = False
     support_reason: str | None = None
+    is_automated: bool = False
 
 
 def resolve_tenant_context(

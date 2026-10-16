@@ -35,6 +35,7 @@ from services.database import (
 )
 from services.interview_scheduling_service import InterviewSchedulingService
 from services.recruitment_campaign_orchestrator import (
+    CampaignAdvancementResponse,
     CampaignExecutionResponse,
     RecruitmentCampaignOrchestrator,
 )
@@ -176,13 +177,23 @@ class RecruitmentCampaignWorker:
 
     def dispatch_once(
         self,
-    ) -> list[CampaignExecutionResponse | ApplicationResponse | CommunicationResponse]:
+    ) -> list[
+        CampaignExecutionResponse
+        | ApplicationResponse
+        | CommunicationResponse
+        | CampaignAdvancementResponse
+    ]:
         """Run one item from each available recruitment workflow."""
         with SessionLocal() as session:
             control = session.get(RecruitmentCampaignWorkerControlRecord, CONTROL_ID)
             if control is not None and control.paused:
                 return []
-        results: list[CampaignExecutionResponse | ApplicationResponse] = list(
+        results: list[
+            CampaignExecutionResponse
+            | ApplicationResponse
+            | CommunicationResponse
+            | CampaignAdvancementResponse
+        ] = list(
             RecruitmentCampaignOrchestrator.dispatch_once(
                 limit=1,
                 provider=self.provider,
@@ -202,6 +213,9 @@ class RecruitmentCampaignWorker:
             )
             if communication_result is not None:
                 results.append(communication_result)
+        results.extend(
+            RecruitmentCampaignOrchestrator.advance_eligible_applications(1)
+        )
         CandidateAvailabilityService.expire_due(limit=100)
         InterviewSchedulingService.expire_due(limit=100)
         return results
@@ -270,6 +284,11 @@ class RecruitmentCampaignWorker:
                                 logger.info(
                                     "Candidate communication dispatched",
                                     extra={"communication_id": communication_id},
+                                )
+                            capacity = self.concurrency - len(active)
+                            if capacity:
+                                RecruitmentCampaignOrchestrator.advance_eligible_applications(
+                                    capacity
                                 )
                 except SQLAlchemyError as exc:
                     self._record_error(exc)

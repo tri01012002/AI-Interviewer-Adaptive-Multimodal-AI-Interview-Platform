@@ -94,6 +94,7 @@ def create_approved_campaign(
     tenant,
     *,
     rubric=None,
+    campaign_automation: dict | None = None,
     expect_approval_blocked: bool = False,
 ) -> str:
     created = client.post(
@@ -108,7 +109,15 @@ def create_approved_campaign(
     steps = (
         (
             "requirements",
-            {"role": "software engineer", "skills": ["Python", "Kubernetes"]},
+            {
+                "role": "software engineer",
+                "skills": ["Python", "Kubernetes"],
+                **(
+                    {}
+                    if campaign_automation is None
+                    else {"campaign_automation": campaign_automation}
+                ),
+            },
         ),
         ("job-description", {"job_description": "Build reliable software systems."}),
         (
