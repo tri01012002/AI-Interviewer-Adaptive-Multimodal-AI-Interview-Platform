@@ -366,7 +366,7 @@ class InterviewSchedulingService:
     def _audit(session, schedule, context, action: str, outcome: str = "allowed") -> None:
         session.add(
             AccessAuditRecord(
-                actor_user_id=context.actor_user_id,
+                actor_user_id=None if context.is_automated else context.actor_user_id,
                 organization_id=context.organization_id,
                 requested_organization_id=context.organization_id,
                 action=action,
@@ -513,7 +513,14 @@ class InterviewSchedulingService:
                 )
                 session.add(schedule)
                 session.flush()
-                cls._event(session, schedule, context.actor_user_id, "proposal_created", "proposed", instant)
+                cls._event(
+                    session,
+                    schedule,
+                    None if context.is_automated else context.actor_user_id,
+                    "proposal_created",
+                    "proposed",
+                    instant,
+                )
                 cls._audit(session, schedule, context, "interview_schedule_proposed")
                 return cls._serialize(schedule)
         except OperationalError as exc:
@@ -553,7 +560,7 @@ class InterviewSchedulingService:
             cls._event(
                 session,
                 schedule,
-                context.actor_user_id,
+                None if context.is_automated else context.actor_user_id,
                 "submitted_for_confirmation",
                 "pending_confirmation",
                 instant,

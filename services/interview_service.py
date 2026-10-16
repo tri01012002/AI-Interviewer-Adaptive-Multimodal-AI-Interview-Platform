@@ -213,6 +213,12 @@ class InterviewService:
                             "Application already has an interview linked to another schedule"
                         )
                     return self._state(existing)
+                if RecruitmentCampaignService.target_is_achieved(
+                    session, campaign
+                ):
+                    raise CampaignInterviewNotReadyError(
+                        "Campaign hiring target has already been achieved"
+                    )
                 state = self._campaign_interview_state(
                     candidate_id=candidate.id,
                     campaign=campaign,

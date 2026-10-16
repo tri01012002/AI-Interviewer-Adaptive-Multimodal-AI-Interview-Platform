@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import json
 import logging
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
 from uuid import uuid4
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import HTTPException, status
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy import and_, case, exists, or_, select, update
 from sqlalchemy.exc import IntegrityError
 
@@ -23,6 +25,15 @@ from integrations.llm_providers.provider import (
     LLMTimeoutError,
     provider_from_settings,
 )
+from services.candidate_availability_service import (
+    AvailabilityRequestCreate,
+    AvailabilityWindow,
+    CandidateAvailabilityService,
+)
+from services.candidate_communication_service import (
+    CandidateCommunicationService,
+    CommunicationDraftRequest,
+)
 from services.database import (
     CAMPAIGN_WORKER_CONTROL_ID,
     AccessAuditRecord,
@@ -30,6 +41,7 @@ from services.database import (
     CandidateCommunicationRecord,
     InterviewRecord,
     InterviewScheduleRecord,
+    OrganizationMembershipRecord,
     RecruitmentApplicationRecord,
     RecruitmentCampaignExecutionRecord,
     RecruitmentCampaignExecutionStepRecord,
@@ -37,6 +49,11 @@ from services.database import (
     RecruitmentCampaignRecord,
     RecruitmentCampaignWorkerControlRecord,
     SessionLocal,
+)
+from services.interview_scheduling_service import (
+    InterviewScheduleProposal,
+    InterviewScheduleTransition,
+    InterviewSchedulingService,
 )
 from services.recruitment_campaign_service import RecruitmentCampaignService
 from services.tenant_authorization import TenantContext
@@ -101,6 +118,69 @@ class CampaignExecutionResponse(BaseModel):
     updated_at: datetime
     completed_at: datetime | None
     steps: list[ExecutionStepResponse]
+
+
+class CampaignAdvancementResponse(BaseModel):
+    campaign_id: str
+    application_id: str
+    action: str
+    resulting_id: str | None = None
+
+
+class CampaignAutomationPolicy(BaseModel):
+    """Explicit approved scheduling policy; missing policy remains a human gate."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    response_deadline: datetime
+    interview_duration_minutes: int = Field(ge=15, le=240)
+    timezone_name: str = Field(min_length=1, max_length=64)
+    proposed_windows: list[AvailabilityWindow] = Field(min_length=1, max_length=10)
+    interviewer_user_id: str = Field(min_length=1, max_length=64)
+    exclusive_resources: list[str] = Field(default_factory=list, max_length=32)
+
+    @field_validator("response_deadline")
+    @classmethod
+    def validate_response_deadline(cls, value: datetime) -> datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("Automation policy datetimes must be timezone-aware")
+        return value
+
+    @field_validator("proposed_windows")
+    @classmethod
+    def validate_proposed_windows(
+        cls, value: list[AvailabilityWindow]
+    ) -> list[AvailabilityWindow]:
+        if any(
+            window.start.tzinfo is None
+            or window.start.utcoffset() is None
+            or window.end.tzinfo is None
+            or window.end.utcoffset() is None
+            for window in value
+        ):
+            raise ValueError("Automation policy windows must be timezone-aware")
+        return value
+
+    @field_validator("timezone_name")
+    @classmethod
+    def validate_timezone_name(cls, value: str) -> str:
+        try:
+            ZoneInfo(value)
+        except ZoneInfoNotFoundError as exc:
+            raise ValueError("Automation policy timezone must be a valid IANA zone") from exc
+        return value
+
+
+@dataclass(frozen=True)
+class _ApplicationAdvancementState:
+    campaign_id: str
+    application_id: str
+    context: TenantContext
+    communication: CandidateCommunicationRecord | None
+    request: CandidateAvailabilityRequestRecord | None
+    schedule: InterviewScheduleRecord | None
+    policy_state: str
+    policy: CampaignAutomationPolicy | None
 
 
 class JobDesignNeedsAttention(RuntimeError):
@@ -218,7 +298,7 @@ class RecruitmentCampaignOrchestrator:
     ) -> None:
         session.add(
             AccessAuditRecord(
-                actor_user_id=context.actor_user_id,
+                actor_user_id=None if context.is_automated else context.actor_user_id,
                 organization_id=context.organization_id,
                 requested_organization_id=context.organization_id,
                 action=action,
@@ -372,6 +452,299 @@ class RecruitmentCampaignOrchestrator:
             provider,
             worker_internal=True,
         )
+
+    @classmethod
+    def advance_eligible_applications(
+        cls, limit: int
+    ) -> list[CampaignAdvancementResponse]:
+        """Apply only safe, idempotent system-owned campaign handoffs."""
+        if limit < 1:
+            return []
+        with SessionLocal() as session:
+            application_ids = list(
+                session.execute(
+                    select(RecruitmentApplicationRecord.id)
+                    .join(
+                        RecruitmentCampaignRecord,
+                        and_(
+                            RecruitmentCampaignRecord.id
+                            == RecruitmentApplicationRecord.campaign_id,
+                            RecruitmentCampaignRecord.organization_id
+                            == RecruitmentApplicationRecord.organization_id,
+                        ),
+                    )
+                    .where(
+                        RecruitmentApplicationRecord.status == "needs_review",
+                        RecruitmentApplicationRecord.review_status == "reviewed",
+                        RecruitmentCampaignRecord.approval_state == "approved",
+                        RecruitmentCampaignRecord.approved_objective_version
+                        == RecruitmentCampaignRecord.objective_version,
+                        RecruitmentCampaignRecord.approved_plan_version
+                        == RecruitmentCampaignRecord.plan_version,
+                        ~exists().where(
+                            RecruitmentCampaignHiringOutcomeRecord.application_id
+                            == RecruitmentApplicationRecord.id
+                        ),
+                    )
+                    .order_by(RecruitmentApplicationRecord.updated_at)
+                    .limit(100)
+                ).scalars()
+            )
+
+        advanced: list[CampaignAdvancementResponse] = []
+        for application_id in application_ids:
+            result = cls.advance_application_once(application_id)
+            if result is not None:
+                advanced.append(result)
+                if len(advanced) >= limit:
+                    break
+        return advanced
+
+    @classmethod
+    def advance_application_once(
+        cls, application_id: str
+    ) -> CampaignAdvancementResponse | None:
+        """Advance one application by one approved, durable system action."""
+        state = cls._load_application_advancement_state(application_id)
+        if state is None:
+            return None
+        if state.communication is None:
+            communication = CandidateCommunicationService.create_draft(
+                application_id,
+                state.context,
+                CommunicationDraftRequest(
+                    template_type="interview_invitation",
+                    idempotency_key=f"r53:invitation:{application_id}",
+                ),
+            )
+            return CampaignAdvancementResponse(
+                campaign_id=state.campaign_id,
+                application_id=application_id,
+                action="communication_draft_created",
+                resulting_id=communication.id,
+            )
+        if state.communication.status not in {"sent", "simulated"}:
+            return None
+        if state.request is None:
+            return cls._create_automation_availability_request(state)
+        if state.request.status != "reviewed":
+            return None
+        return cls._advance_to_schedule_confirmation(state)
+
+    @classmethod
+    def _load_application_advancement_state(
+        cls, application_id: str
+    ) -> _ApplicationAdvancementState | None:
+        with SessionLocal() as session:
+            application = session.execute(
+                select(RecruitmentApplicationRecord).where(
+                    RecruitmentApplicationRecord.id == application_id
+                )
+            ).scalar_one_or_none()
+            if application is None:
+                return None
+            campaign = session.execute(
+                select(RecruitmentCampaignRecord).where(
+                    RecruitmentCampaignRecord.id == application.campaign_id,
+                    RecruitmentCampaignRecord.organization_id
+                    == application.organization_id,
+                )
+            ).scalar_one_or_none()
+            if (
+                campaign is None
+                or not RecruitmentCampaignService.approval_is_current(campaign)
+                or not RecruitmentCampaignService._objective_complete(campaign)
+                or RecruitmentCampaignService.target_is_achieved(session, campaign)
+                or application.status != "needs_review"
+                or application.review_status != "reviewed"
+            ):
+                return None
+
+            membership = session.execute(
+                select(OrganizationMembershipRecord).where(
+                    OrganizationMembershipRecord.organization_id
+                    == campaign.organization_id,
+                    OrganizationMembershipRecord.user_id == campaign.owner_user_id,
+                    OrganizationMembershipRecord.status == "active",
+                )
+            ).scalar_one_or_none()
+            if membership is None or membership.role not in {"recruiter", "org_admin"}:
+                return None
+            context = TenantContext(
+                actor_user_id=campaign.owner_user_id,
+                organization_id=campaign.organization_id,
+                role=membership.role,
+                is_automated=True,
+            )
+            policy_state, policy = cls._automation_policy(campaign)
+            communication = session.execute(
+                select(CandidateCommunicationRecord)
+                .where(
+                    CandidateCommunicationRecord.organization_id
+                    == campaign.organization_id,
+                    CandidateCommunicationRecord.application_id == application.id,
+                    CandidateCommunicationRecord.template_type
+                    == "interview_invitation",
+                )
+                .order_by(CandidateCommunicationRecord.updated_at.desc())
+                .limit(1)
+            ).scalar_one_or_none()
+            request = session.execute(
+                select(CandidateAvailabilityRequestRecord)
+                .where(
+                    CandidateAvailabilityRequestRecord.organization_id
+                    == campaign.organization_id,
+                    CandidateAvailabilityRequestRecord.application_id
+                    == application.id,
+                )
+                .order_by(CandidateAvailabilityRequestRecord.updated_at.desc())
+                .limit(1)
+            ).scalar_one_or_none()
+            if request is None:
+                policy_state = cls._availability_policy_state(
+                    policy_state, policy, datetime.now(UTC)
+                )
+            schedule = session.execute(
+                select(InterviewScheduleRecord)
+                .where(
+                    InterviewScheduleRecord.organization_id
+                    == campaign.organization_id,
+                    InterviewScheduleRecord.application_id == application.id,
+                )
+                .order_by(InterviewScheduleRecord.updated_at.desc())
+                .limit(1)
+            ).scalar_one_or_none()
+            if session.execute(
+                select(RecruitmentCampaignHiringOutcomeRecord.id).where(
+                    RecruitmentCampaignHiringOutcomeRecord.organization_id
+                    == campaign.organization_id,
+                    RecruitmentCampaignHiringOutcomeRecord.application_id
+                    == application.id,
+                )
+            ).scalar_one_or_none():
+                return None
+            return _ApplicationAdvancementState(
+                campaign_id=campaign.id,
+                application_id=application_id,
+                context=context,
+                communication=communication,
+                request=request,
+                schedule=schedule,
+                policy_state=policy_state,
+                policy=policy,
+            )
+
+    @staticmethod
+    def _create_automation_availability_request(
+        state: _ApplicationAdvancementState,
+    ) -> CampaignAdvancementResponse | None:
+        if state.policy_state != "available" or state.policy is None:
+            return None
+        request = CandidateAvailabilityService.create_request(
+            state.campaign_id,
+            state.context,
+            AvailabilityRequestCreate(
+                application_id=state.application_id,
+                idempotency_key=f"r53:availability:{state.application_id}",
+                response_deadline=state.policy.response_deadline,
+                interview_duration_minutes=state.policy.interview_duration_minutes,
+                timezone_name=state.policy.timezone_name,
+                proposed_windows=state.policy.proposed_windows,
+            ),
+        )
+        return CampaignAdvancementResponse(
+            campaign_id=state.campaign_id,
+            application_id=state.application_id,
+            action="availability_request_created",
+            resulting_id=request.id,
+        )
+
+    @classmethod
+    def _advance_to_schedule_confirmation(
+        cls, state: _ApplicationAdvancementState
+    ) -> CampaignAdvancementResponse | None:
+        if state.schedule is not None:
+            if state.schedule.status != "proposed":
+                return None
+            submitted = InterviewSchedulingService.submit(
+                state.schedule.id,
+                state.context,
+                InterviewScheduleTransition(expected_version=state.schedule.version),
+            )
+            return CampaignAdvancementResponse(
+                campaign_id=state.campaign_id,
+                application_id=state.application_id,
+                action="schedule_submitted_for_confirmation",
+                resulting_id=submitted.id,
+            )
+        if state.policy_state != "available" or state.policy is None:
+            return None
+        compatible = InterviewSchedulingService.compatible_slots(
+            state.request.id, state.context
+        )
+        if not compatible.windows:
+            return None
+        proposed = InterviewSchedulingService.propose(
+            state.campaign_id,
+            state.application_id,
+            state.context,
+            InterviewScheduleProposal(
+                availability_request_id=state.request.id,
+                window_index=int(compatible.windows[0]["window_index"]),
+                interviewer_user_id=state.policy.interviewer_user_id,
+                exclusive_resources=state.policy.exclusive_resources,
+                idempotency_key=f"r53:schedule:{state.application_id}",
+            ),
+        )
+        submitted = InterviewSchedulingService.submit(
+            proposed.id,
+            state.context,
+            InterviewScheduleTransition(expected_version=proposed.version),
+        )
+        return CampaignAdvancementResponse(
+            campaign_id=state.campaign_id,
+            application_id=state.application_id,
+            action="schedule_submitted_for_confirmation",
+            resulting_id=submitted.id,
+        )
+
+    @staticmethod
+    def _automation_policy(
+        campaign: RecruitmentCampaignRecord,
+    ) -> tuple[str, CampaignAutomationPolicy | None]:
+        try:
+            requirements = json.loads(campaign.structured_requirements_json or "{}")
+            if not isinstance(requirements, dict):
+                return "invalid", None
+            if "campaign_automation" not in requirements:
+                return "missing", None
+            policy = CampaignAutomationPolicy.model_validate(
+                requirements["campaign_automation"]
+            )
+            return "available", policy
+        except (json.JSONDecodeError, TypeError, ValueError):
+            return "invalid", None
+
+    @staticmethod
+    def _availability_policy_state(
+        policy_state: str,
+        policy: CampaignAutomationPolicy | None,
+        now: datetime,
+    ) -> str:
+        if policy_state != "available" or policy is None:
+            return policy_state
+        if policy.response_deadline <= now:
+            return "expired"
+        try:
+            CandidateAvailabilityService._normalize_windows(
+                policy.proposed_windows,
+                policy.timezone_name,
+                policy.interview_duration_minutes,
+                now=now,
+            )
+        except HTTPException:
+            return "invalid"
+        return "available"
 
     @classmethod
     def _create_approved_executions(cls, limit: int) -> None:
@@ -564,6 +937,7 @@ class RecruitmentCampaignOrchestrator:
                 actor_user_id=row.requested_by_user_id,
                 organization_id=row.organization_id,
                 role="recruiter",
+                is_automated=True,
             )
 
     @classmethod
@@ -1185,6 +1559,7 @@ class RecruitmentCampaignOrchestrator:
             context,
             now,
         )
+        policy_state, policy = cls._automation_policy(campaign)
         application_ids = [item.id for item in applications]
         grouped: dict[type, dict[str, list[Any]]] = {}
         for model in (
@@ -1242,6 +1617,11 @@ class RecruitmentCampaignOrchestrator:
                 else None
             )
             outcome = outcomes[-1] if outcomes else None
+            application_policy_state = (
+                cls._availability_policy_state(policy_state, policy, now)
+                if request is None
+                else policy_state
+            )
             stage, next_action = cls._application_stage(
                 application,
                 communication,
@@ -1249,10 +1629,15 @@ class RecruitmentCampaignOrchestrator:
                 schedule,
                 interview,
                 outcome,
+                scheduling_policy_state=application_policy_state,
             )
 
             handoffs = {
                 "application_id": application.id,
+                "waiting_on": cls._waiting_on(stage),
+                "blocking_reason": cls._blocking_reason(
+                    stage, application_policy_state
+                ),
                 "communication_id": None if communication is None else communication.id,
                 "communication_status": (
                     None if communication is None else communication.status
@@ -1299,6 +1684,8 @@ class RecruitmentCampaignOrchestrator:
         schedule: InterviewScheduleRecord | None,
         interview: InterviewRecord | None,
         outcome: RecruitmentCampaignHiringOutcomeRecord | None,
+        *,
+        scheduling_policy_state: str = "missing",
     ) -> tuple[str, str | None]:
         if outcome is not None:
             return outcome.outcome, None
@@ -1310,13 +1697,20 @@ class RecruitmentCampaignOrchestrator:
             return "screening_in_progress", "await_screening_result"
         if application.review_status != "reviewed":
             return "awaiting_screening_review", "review_screening"
-        if communication is None or communication.status == "cancelled":
+        if communication is not None and communication.status == "cancelled":
+            return "needs_attention", "resolve_cancelled_communication"
+        if communication is None:
             return "awaiting_communication", "create_communication_draft"
         if communication.status in {"draft", "awaiting_approval", "approved", "sending"}:
             return "communication_in_progress", "approve_or_dispatch_communication"
         if communication.status in {"retryable_failure", "needs_attention"}:
             return communication.status, "resolve_communication"
-        return cls._after_communication_stage(request, schedule, interview)
+        return cls._after_communication_stage(
+            request,
+            schedule,
+            interview,
+            scheduling_policy_state=scheduling_policy_state,
+        )
 
     @classmethod
     def _after_communication_stage(
@@ -1324,8 +1718,14 @@ class RecruitmentCampaignOrchestrator:
         request: CandidateAvailabilityRequestRecord | None,
         schedule: InterviewScheduleRecord | None,
         interview: InterviewRecord | None,
+        *,
+        scheduling_policy_state: str,
     ) -> tuple[str, str | None]:
         if request is None:
+            if scheduling_policy_state == "missing":
+                return "awaiting_scheduling_policy", "approve_scheduling_policy"
+            if scheduling_policy_state in {"invalid", "expired"}:
+                return "needs_attention", "resolve_scheduling_policy"
             return "awaiting_availability_request", "request_availability"
         if request.status == "pending_response":
             return "awaiting_candidate_availability", "await_candidate_response"
@@ -1335,15 +1735,27 @@ class RecruitmentCampaignOrchestrator:
             return "needs_attention", "resolve_availability"
         if request.status != "reviewed":
             return "availability_in_progress", "review_availability"
-        return cls._after_availability_stage(schedule, interview)
+        return cls._after_availability_stage(
+            schedule,
+            interview,
+            scheduling_policy_state=scheduling_policy_state,
+        )
 
     @classmethod
     def _after_availability_stage(
         cls,
         schedule: InterviewScheduleRecord | None,
         interview: InterviewRecord | None,
+        *,
+        scheduling_policy_state: str,
     ) -> tuple[str, str | None]:
-        if schedule is None or schedule.status in {"cancelled", "expired"}:
+        if schedule is not None and schedule.status in {"cancelled", "expired"}:
+            return "needs_attention", "resolve_schedule"
+        if schedule is None:
+            if scheduling_policy_state == "missing":
+                return "awaiting_scheduling_policy", "approve_scheduling_policy"
+            if scheduling_policy_state in {"invalid", "expired"}:
+                return "needs_attention", "resolve_scheduling_policy"
             return "awaiting_schedule_proposal", "propose_internal_schedule"
         if schedule.status in {"proposed", "pending_confirmation", "reschedule_pending"}:
             return "awaiting_schedule_confirmation", "confirm_internal_schedule"
@@ -1357,6 +1769,37 @@ class RecruitmentCampaignOrchestrator:
         if interview_status == "active":
             return "interview_in_progress", "candidate_continue_interview"
         return "needs_attention", "review_interview_state"
+
+    @staticmethod
+    def _waiting_on(stage: str) -> str | None:
+        if stage in {
+            "awaiting_candidate_availability",
+            "awaiting_schedule_confirmation",
+            "awaiting_interview",
+            "interview_in_progress",
+        }:
+            return "candidate"
+        if stage in {
+            "awaiting_screening_review",
+            "awaiting_communication",
+            "communication_in_progress",
+            "awaiting_availability_review",
+            "awaiting_hiring_decision",
+        }:
+            return "recruiter_or_authorized_reviewer"
+        if stage == "awaiting_scheduling_policy":
+            return "campaign_owner_or_authorized_admin"
+        if stage in {"needs_attention", "retryable_failure"}:
+            return "authorized_operator"
+        return None
+
+    @staticmethod
+    def _blocking_reason(stage: str, policy_state: str) -> str | None:
+        if stage == "awaiting_scheduling_policy":
+            return "approved_explicit_scheduling_policy_required"
+        if stage == "needs_attention" and policy_state in {"invalid", "expired"}:
+            return f"approved_scheduling_policy_{policy_state}"
+        return None
 
     @classmethod
     def _save_lifecycle_step(

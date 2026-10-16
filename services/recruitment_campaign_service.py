@@ -275,6 +275,7 @@ class CampaignApplicationWorkflow(BaseModel):
     application_id: str
     stage: str
     next_action: str | None
+    work_status: str
     handoffs: dict[str, Any]
 
 
@@ -1040,12 +1041,116 @@ class RecruitmentCampaignService:
                         support_reason=context.support_reason,
                     )
                 )
+                cls._update_application_outcome_step(
+                    session,
+                    campaign,
+                    application,
+                    record,
+                    now,
+                )
+                cls._complete_execution_if_target_achieved(
+                    session, campaign, context, now
+                )
                 return cls._serialize_outcome(record)
         except IntegrityError as exc:
             raise HTTPException(
                 status_code=409,
                 detail="A hiring outcome already exists for this application or idempotency key",
             ) from exc
+
+    @classmethod
+    def _complete_execution_if_target_achieved(
+        cls,
+        session,
+        campaign: RecruitmentCampaignRecord,
+        context: TenantContext,
+        now: datetime,
+    ) -> None:
+        if not cls.target_is_achieved(session, campaign, now=now):
+            return
+        execution = session.execute(
+            select(RecruitmentCampaignExecutionRecord).where(
+                RecruitmentCampaignExecutionRecord.organization_id
+                == campaign.organization_id,
+                RecruitmentCampaignExecutionRecord.campaign_id == campaign.id,
+            )
+        ).scalar_one_or_none()
+        if execution is None or execution.status == "completed":
+            return
+        execution.status = "completed"
+        execution.completed_at = now
+        execution.lease_token = None
+        execution.lease_expires_at = None
+        execution.available_at = None
+        execution.failure_code = None
+        execution.failure_message = None
+        execution.updated_at = now
+        session.add(
+            AccessAuditRecord(
+                actor_user_id=context.actor_user_id,
+                organization_id=campaign.organization_id,
+                requested_organization_id=campaign.organization_id,
+                action="campaign_hiring_target_achieved",
+                resource_type="recruitment_campaign_execution",
+                resource_id=execution.id,
+                outcome="allowed",
+                support_reason=context.support_reason,
+            )
+        )
+
+    @staticmethod
+    def _update_application_outcome_step(
+        session,
+        campaign: RecruitmentCampaignRecord,
+        application: RecruitmentApplicationRecord,
+        outcome: RecruitmentCampaignHiringOutcomeRecord,
+        now: datetime,
+    ) -> None:
+        execution = session.execute(
+            select(RecruitmentCampaignExecutionRecord).where(
+                RecruitmentCampaignExecutionRecord.organization_id
+                == campaign.organization_id,
+                RecruitmentCampaignExecutionRecord.campaign_id == campaign.id,
+            )
+        ).scalar_one_or_none()
+        if execution is None:
+            return
+        step = session.execute(
+            select(RecruitmentCampaignExecutionStepRecord).where(
+                RecruitmentCampaignExecutionStepRecord.execution_id == execution.id,
+                RecruitmentCampaignExecutionStepRecord.step_key
+                == f"application:{application.id}",
+            )
+        ).scalar_one_or_none()
+        output = {} if step is None or not step.output_json else json.loads(step.output_json)
+        output.update(
+            {
+                "application_id": application.id,
+                "stage": outcome.outcome,
+                "next_action": None,
+                "hiring_outcome_id": outcome.id,
+                "hiring_outcome": outcome.outcome,
+                "criteria_satisfied": outcome.criteria_satisfied,
+                "waiting_on": None,
+                "blocking_reason": None,
+            }
+        )
+        if step is None:
+            step = RecruitmentCampaignExecutionStepRecord(
+                execution_id=execution.id,
+                step_key=f"application:{application.id}",
+                status="completed",
+                attempt_count=0,
+                input_json="{}",
+                output_json=json.dumps(output, sort_keys=True, separators=(",", ":")),
+                created_at=now,
+                updated_at=now,
+            )
+            session.add(step)
+        else:
+            step.status = "completed"
+            step.output_json = json.dumps(output, sort_keys=True, separators=(",", ":"))
+            step.updated_at = now
 
     @staticmethod
     def _require_outcome_role(context: TenantContext) -> None:
@@ -1228,6 +1333,34 @@ class RecruitmentCampaignService:
         return "active"
 
     @classmethod
+    def target_is_achieved(
+        cls,
+        session,
+        campaign: RecruitmentCampaignRecord,
+        *,
+        now: datetime | None = None,
+    ) -> bool:
+        instant = now or datetime.now(UTC)
+        objective = cls._objective(campaign)
+        outcomes = list(
+            session.execute(
+                select(RecruitmentCampaignHiringOutcomeRecord).where(
+                    RecruitmentCampaignHiringOutcomeRecord.organization_id
+                    == campaign.organization_id,
+                    RecruitmentCampaignHiringOutcomeRecord.campaign_id
+                    == campaign.id,
+                )
+            ).scalars()
+        )
+        qualifying_hires = cls._qualifying_hire_count(objective, campaign, outcomes)
+        return (
+            cls._objective_progress_status(
+                objective, campaign, qualifying_hires, instant
+            )
+            == "target_achieved"
+        )
+
+    @classmethod
     def get_progress(
         cls,
         campaign_id: str,
@@ -1325,6 +1458,7 @@ class RecruitmentCampaignService:
                     application_id=application_id,
                     stage=stage,
                     next_action=output.get("next_action"),
+                    work_status=step.status,
                     handoffs=handoffs,
                 )
             )

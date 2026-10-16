@@ -256,7 +256,12 @@ class CandidateAvailabilityService:
                 session.add(record)
                 session.flush()
                 cls._event(
-                    session, record, context.actor_user_id, "request_created", "created", instant
+                    session,
+                    record,
+                    None if context.is_automated else context.actor_user_id,
+                    "request_created",
+                    "created",
+                    instant,
                 )
                 cls._audit(session, record, context, "candidate_availability_request_created")
                 session.flush()
@@ -894,7 +899,7 @@ class CandidateAvailabilityService:
     ) -> None:
         session.add(
             AccessAuditRecord(
-                actor_user_id=context.actor_user_id,
+                actor_user_id=None if context.is_automated else context.actor_user_id,
                 organization_id=context.organization_id,
                 requested_organization_id=context.organization_id,
                 action=action,
