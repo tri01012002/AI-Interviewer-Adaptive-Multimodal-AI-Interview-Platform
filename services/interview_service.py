@@ -213,6 +213,17 @@ class InterviewService:
                             "Application already has an interview linked to another schedule"
                         )
                     return self._state(existing)
+                # Checked after the replay above: a recorded outcome blocks
+                # creating a new interview, not returning the existing one.
+                if self._has_recorded_outcome(
+                    session,
+                    campaign_id=campaign_id,
+                    application_id=application_id,
+                    organization_id=organization_id,
+                ):
+                    raise CampaignInterviewNotReadyError(
+                        "Application already has a recorded hiring outcome"
+                    )
                 if RecruitmentCampaignService.target_is_achieved(
                     session, campaign
                 ):
@@ -308,19 +319,28 @@ class InterviewService:
             raise CampaignInterviewNotReadyError(
                 "A confirmed internal schedule is required"
             )
-        has_outcome = session.execute(
-            select(RecruitmentCampaignHiringOutcomeRecord.id).where(
-                RecruitmentCampaignHiringOutcomeRecord.organization_id
-                == organization_id,
-                RecruitmentCampaignHiringOutcomeRecord.campaign_id == campaign_id,
-                RecruitmentCampaignHiringOutcomeRecord.application_id == application_id,
-            )
-        ).scalar_one_or_none()
-        if has_outcome is not None:
-            raise CampaignInterviewNotReadyError(
-                "Application already has a recorded hiring outcome"
-            )
         return candidate, campaign
+
+    @staticmethod
+    def _has_recorded_outcome(
+        session,
+        *,
+        campaign_id: str,
+        application_id: str,
+        organization_id: str,
+    ) -> bool:
+        return (
+            session.execute(
+                select(RecruitmentCampaignHiringOutcomeRecord.id).where(
+                    RecruitmentCampaignHiringOutcomeRecord.organization_id
+                    == organization_id,
+                    RecruitmentCampaignHiringOutcomeRecord.campaign_id == campaign_id,
+                    RecruitmentCampaignHiringOutcomeRecord.application_id
+                    == application_id,
+                )
+            ).scalar_one_or_none()
+            is not None
+        )
 
     def _campaign_interview_state(
         self,
