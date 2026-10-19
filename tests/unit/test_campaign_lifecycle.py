@@ -2,13 +2,13 @@ from __future__ import annotations
 
 import json
 import socket
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 
 from apps.api.main import app
 from config import settings
@@ -24,7 +24,11 @@ from services.database import (
     InterviewRecord,
     InterviewScheduleEventRecord,
     InterviewScheduleRecord,
+    RecruitmentApplicationRecord,
     RecruitmentCampaignExecutionRecord,
+    RecruitmentCampaignExecutionStepRecord,
+    RecruitmentCampaignHiringOutcomeRecord,
+    RecruitmentCampaignRecord,
     SessionLocal,
 )
 from services.recruitment_campaign_orchestrator import RecruitmentCampaignOrchestrator
@@ -337,11 +341,7 @@ def _wake_execution(campaign_id: str) -> str:
         return execution.id
 
 
-def test_approved_campaign_recovers_across_intake_to_explicit_hiring_outcomes(
-    client: TestClient,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-):
+def _setup_offline_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setattr(settings, "CV_STORAGE_PATH", str(tmp_path))
     monkeypatch.setattr(settings, "EMAIL_PROVIDER", "offline_simulation")
     monkeypatch.setattr(
@@ -354,6 +354,14 @@ def test_approved_campaign_recovers_across_intake_to_explicit_hiring_outcomes(
         "create_connection",
         lambda *args, **kwargs: pytest.fail("campaign test attempted a network connection"),
     )
+
+
+def test_approved_campaign_recovers_across_intake_to_explicit_hiring_outcomes(
+    client: TestClient,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    _setup_offline_env(monkeypatch, tmp_path)
 
     tenant = create_tenant(client)
     _, first_headers, _, _ = create_candidate_through_invitation(client, tenant)
@@ -488,3 +496,617 @@ def test_approved_campaign_recovers_across_intake_to_explicit_hiring_outcomes(
             assert communication is not None
             assert communication.delivery_status == "simulated"
             assert communication.sent_at is None
+
+
+def test_missing_and_invalid_automation_policy_produces_actionable_waiting_states(
+    client: TestClient,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    _setup_offline_env(monkeypatch, tmp_path)
+    tenant = create_tenant(client)
+    _, candidate_headers, _, _ = create_candidate_through_invitation(client, tenant)
+
+    campaign_id = create_approved_campaign(client, tenant, campaign_automation=None)
+    execution = RecruitmentCampaignOrchestrator.start(
+        campaign_id,
+        TenantContext(
+            actor_user_id=tenant.recruiter["id"],
+            organization_id=tenant.organization_id,
+            role="recruiter",
+        ),
+    )
+    assert execution.status == "awaiting_progress"
+
+    uploaded = submit_cv(
+        client,
+        tenant,
+        candidate_headers,
+        campaign_id,
+        make_docx("Backend engineer with Python expertise."),
+    )
+    assert uploaded.status_code == 202
+    application_id = uploaded.json()["id"]
+    processed = CandidateApplicationService.process_dispatched(application_id)
+    assert processed is not None and processed.status == "needs_review"
+    reviewed = client.post(
+        f"/api/v1/recruitment-applications/{application_id}/review",
+        json={
+            "criteria": [
+                {"criterion_id": item["criterion_id"], "status": "confirmed"}
+                for item in processed.screening["assessments"]
+            ]
+        },
+        headers=tenant_headers(tenant.org_admin_headers, tenant.organization_id),
+    )
+    assert reviewed.status_code == 200
+
+    RecruitmentCampaignWorker().dispatch_once()
+    with SessionLocal() as session:
+        communication = session.execute(
+            select(CandidateCommunicationRecord).where(
+                CandidateCommunicationRecord.application_id == application_id,
+                CandidateCommunicationRecord.template_type == "interview_invitation",
+            )
+        ).scalar_one()
+        communication_id = communication.id
+
+    client.post(
+        f"/api/v1/candidate-communications/{communication_id}/submit",
+        headers=tenant_headers(tenant.recruiter_headers, tenant.organization_id),
+    )
+    client.post(
+        f"/api/v1/candidate-communications/{communication_id}/approve",
+        headers=tenant_headers(tenant.org_admin_headers, tenant.organization_id),
+    )
+
+    RecruitmentCampaignWorker().dispatch_once()
+
+    execution_id = _wake_execution(campaign_id)
+    reconciled = RecruitmentCampaignOrchestrator.run_dispatched(execution_id)
+    assert reconciled is not None
+
+    with SessionLocal() as session:
+        assert session.scalar(
+            select(func.count(CandidateAvailabilityRequestRecord.id)).where(
+                CandidateAvailabilityRequestRecord.application_id == application_id
+            )
+        ) == 0
+
+    progress = client.get(
+        f"/api/v1/recruitment-campaigns/{campaign_id}/progress",
+        headers=tenant_headers(tenant.recruiter_headers, tenant.organization_id),
+    ).json()
+    workflow = next(
+        w for w in progress["application_workflows"] if w["application_id"] == application_id
+    )
+    assert workflow["stage"] == "awaiting_scheduling_policy"
+    assert workflow["handoffs"]["waiting_on"] == "campaign_owner_or_authorized_admin"
+    assert workflow["handoffs"]["blocking_reason"] == "approved_explicit_scheduling_policy_required"
+
+    expired_policy = {
+        "response_deadline": (datetime.now(UTC) - timedelta(days=1)).isoformat(),
+        "interview_duration_minutes": 30,
+        "timezone_name": "UTC",
+        "proposed_windows": [
+            {
+                "start": (datetime.now(UTC) - timedelta(hours=2)).isoformat(),
+                "end": (datetime.now(UTC) - timedelta(hours=1, minutes=30)).isoformat(),
+            }
+        ],
+        "interviewer_user_id": tenant.recruiter["id"],
+        "exclusive_resources": [],
+    }
+    with SessionLocal.begin() as session:
+        camp = session.get(RecruitmentCampaignRecord, campaign_id)
+        reqs = json.loads(camp.structured_requirements_json)
+        reqs["campaign_automation"] = expired_policy
+        camp.structured_requirements_json = json.dumps(reqs)
+
+    execution_id = _wake_execution(campaign_id)
+    reconciled = RecruitmentCampaignOrchestrator.run_dispatched(execution_id)
+    assert reconciled is not None
+
+    progress2 = client.get(
+        f"/api/v1/recruitment-campaigns/{campaign_id}/progress",
+        headers=tenant_headers(tenant.recruiter_headers, tenant.organization_id),
+    ).json()
+    workflow2 = next(
+        w for w in progress2["application_workflows"] if w["application_id"] == application_id
+    )
+    assert workflow2["stage"] == "needs_attention"
+    assert workflow2["handoffs"]["waiting_on"] == "authorized_operator"
+    assert workflow2["handoffs"]["blocking_reason"] == "approved_scheduling_policy_expired"
+
+
+def test_version_change_and_stale_claim_commit_fencing(
+    client: TestClient,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    _setup_offline_env(monkeypatch, tmp_path)
+    tenant = create_tenant(client)
+    campaign_id = create_approved_campaign(client, tenant)
+    execution = RecruitmentCampaignOrchestrator.start(
+        campaign_id,
+        TenantContext(
+            actor_user_id=tenant.recruiter["id"],
+            organization_id=tenant.organization_id,
+            role="recruiter",
+        ),
+    )
+    assert execution.status == "awaiting_progress"
+
+    stale_token = "stale-worker-token-999"
+    now = datetime.now(UTC)
+    with SessionLocal.begin() as session:
+        rec = session.get(RecruitmentCampaignExecutionRecord, execution.id)
+        rec.status = "running"
+        rec.lease_token = stale_token
+        rec.lease_expires_at = now + timedelta(seconds=60)
+
+    with SessionLocal.begin() as session:
+        camp = session.get(RecruitmentCampaignRecord, campaign_id)
+        camp.plan_version += 1
+        camp.approval_state = "pending_review"
+
+    context = TenantContext(
+        actor_user_id=tenant.recruiter["id"],
+        organization_id=tenant.organization_id,
+        role="recruiter",
+        is_automated=True,
+    )
+    res = RecruitmentCampaignOrchestrator._run(
+        execution.id,
+        context,
+        provider=None,
+        worker_internal=True,
+    )
+    assert res.status == "needs_attention"
+    assert res.failure_code == "campaign_approval_revoked"
+
+    campaign_b_id = create_approved_campaign(client, tenant)
+    _, candidate_headers, _, _ = create_candidate_through_invitation(client, tenant)
+    uploaded = submit_cv(
+        client,
+        tenant,
+        candidate_headers,
+        campaign_b_id,
+        make_docx("Python software engineer."),
+    )
+    assert uploaded.status_code == 202
+    app_id = uploaded.json()["id"]
+
+    from services.candidate_screening import CandidateScreeningResult
+    screening = CandidateScreeningResult(
+        application_id=app_id,
+        assessments=[],
+        confidence=1.0,
+        decision="advance",
+    )
+    stale_result = CandidateApplicationService._persist_screening(
+        app_id,
+        tenant.organization_id,
+        "non-matching-lease-token",
+        "some text",
+        {"parsed": True},
+        screening,
+    )
+    assert stale_result is None
+
+    with SessionLocal() as session:
+        app_rec = session.get(RecruitmentApplicationRecord, app_id)
+        assert app_rec.status == "pending"
+
+
+def test_replaying_and_worker_restart_are_strictly_idempotent(
+    client: TestClient,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    _setup_offline_env(monkeypatch, tmp_path)
+    tenant = create_tenant(client)
+    _, candidate_headers, _, _ = create_candidate_through_invitation(client, tenant)
+    policy_windows = _future_local_slots(count=2)
+    campaign_id = create_approved_campaign(
+        client,
+        tenant,
+        campaign_automation={
+            "response_deadline": (datetime.now(UTC) + timedelta(days=2)).isoformat(),
+            "interview_duration_minutes": 30,
+            "timezone_name": "Asia/Ho_Chi_Minh",
+            "proposed_windows": [
+                {
+                    "start": start.isoformat(),
+                    "end": (start + timedelta(minutes=30)).isoformat(),
+                }
+                for start in policy_windows
+            ],
+            "interviewer_user_id": tenant.recruiter["id"],
+            "exclusive_resources": [],
+        },
+    )
+    RecruitmentCampaignOrchestrator.start(
+        campaign_id,
+        TenantContext(
+            actor_user_id=tenant.recruiter["id"],
+            organization_id=tenant.organization_id,
+            role="recruiter",
+        ),
+    )
+
+    uploaded = submit_cv(
+        client,
+        tenant,
+        candidate_headers,
+        campaign_id,
+        make_docx("Senior developer with Python and Kubernetes."),
+    )
+    app_id = uploaded.json()["id"]
+    processed = CandidateApplicationService.process_dispatched(app_id)
+    assert processed is not None and processed.status == "needs_review"
+    client.post(
+        f"/api/v1/recruitment-applications/{app_id}/review",
+        json={
+            "criteria": [
+                {"criterion_id": item["criterion_id"], "status": "confirmed"}
+                for item in processed.screening["assessments"]
+            ]
+        },
+        headers=tenant_headers(tenant.org_admin_headers, tenant.organization_id),
+    )
+
+    worker = RecruitmentCampaignWorker()
+    for _ in range(5):
+        worker.dispatch_once()
+
+    with SessionLocal() as session:
+        comms = session.execute(
+            select(CandidateCommunicationRecord).where(
+                CandidateCommunicationRecord.application_id == app_id
+            )
+        ).scalars().all()
+        assert len(comms) == 1
+        comm_id = comms[0].id
+
+    client.post(
+        f"/api/v1/candidate-communications/{comm_id}/submit",
+        headers=tenant_headers(tenant.recruiter_headers, tenant.organization_id),
+    )
+    client.post(
+        f"/api/v1/candidate-communications/{comm_id}/approve",
+        headers=tenant_headers(tenant.org_admin_headers, tenant.organization_id),
+    )
+
+    for _ in range(5):
+        worker.dispatch_once()
+
+    with SessionLocal() as session:
+        requests = session.execute(
+            select(CandidateAvailabilityRequestRecord).where(
+                CandidateAvailabilityRequestRecord.application_id == app_id
+            )
+        ).scalars().all()
+        assert len(requests) == 1
+        req = requests[0]
+        proposed = json.loads(req.proposed_windows_json)
+
+    zone = ZoneInfo(req.timezone_name)
+    slot = proposed[0]
+    client.post(
+        f"/api/v1/candidate-availability-requests/{req.id}/responses",
+        json={
+            "idempotency_key": f"idemp-resp-{app_id[:16]}",
+            "timezone_name": req.timezone_name,
+            "windows": [
+                {
+                    "start": datetime.fromisoformat(slot["start"]).astimezone(zone).isoformat(),
+                    "end": datetime.fromisoformat(slot["end"]).astimezone(zone).isoformat(),
+                }
+            ],
+        },
+        headers=tenant_headers(candidate_headers, tenant.organization_id),
+    )
+    client.post(
+        f"/api/v1/candidate-availability-requests/{req.id}/review",
+        json={"preferred_window_indices": [0]},
+        headers=tenant_headers(tenant.recruiter_headers, tenant.organization_id),
+    )
+
+    for _ in range(5):
+        worker.dispatch_once()
+
+    with SessionLocal() as session:
+        schedules = session.execute(
+            select(InterviewScheduleRecord).where(
+                InterviewScheduleRecord.application_id == app_id
+            )
+        ).scalars().all()
+        assert len(schedules) == 1
+
+
+def test_failure_on_one_application_does_not_block_unrelated_applications(
+    client: TestClient,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    _setup_offline_env(monkeypatch, tmp_path)
+    tenant = create_tenant(client)
+    _, headers_a, _, _ = create_candidate_through_invitation(client, tenant)
+    _, headers_b, _, _ = create_candidate_through_invitation(client, tenant)
+    campaign_id = create_approved_campaign(client, tenant)
+    RecruitmentCampaignOrchestrator.start(
+        campaign_id,
+        TenantContext(
+            actor_user_id=tenant.recruiter["id"],
+            organization_id=tenant.organization_id,
+            role="recruiter",
+        ),
+    )
+
+    upload_a = submit_cv(client, tenant, headers_a, campaign_id, make_docx("Candidate A CV"))
+    assert upload_a.status_code == 202
+    app_a_id = upload_a.json()["id"]
+
+    with SessionLocal.begin() as session:
+        rec_a = session.get(RecruitmentApplicationRecord, app_a_id)
+        rec_a.status = "needs_attention"
+        rec_a.failure_code = "cv_corrupted"
+        rec_a.failure_message = "CV parsing could not extract valid text"
+
+    upload_b = submit_cv(client, tenant, headers_b, campaign_id, make_docx("Candidate B CV with Python experience"))
+    assert upload_b.status_code == 202
+    app_b_id = upload_b.json()["id"]
+
+    worker = RecruitmentCampaignWorker()
+    worker.dispatch_once()
+
+    with SessionLocal() as session:
+        rec_b = session.get(RecruitmentApplicationRecord, app_b_id)
+        assert rec_b is not None and rec_b.status == "needs_review"
+        rec_a = session.get(RecruitmentApplicationRecord, app_a_id)
+        assert rec_a.status == "needs_attention"
+
+    processed_b = CandidateApplicationService.get_application(
+        app_b_id,
+        TenantContext(
+            actor_user_id=tenant.recruiter["id"],
+            organization_id=tenant.organization_id,
+            role="recruiter",
+        ),
+    )
+    reviewed_b = client.post(
+        f"/api/v1/recruitment-applications/{app_b_id}/review",
+        json={
+            "criteria": [
+                {"criterion_id": item["criterion_id"], "status": "confirmed"}
+                for item in processed_b.screening["assessments"]
+            ]
+        },
+        headers=tenant_headers(tenant.org_admin_headers, tenant.organization_id),
+    )
+    assert reviewed_b.status_code == 200, reviewed_b.text
+
+    worker.dispatch_once()
+    with SessionLocal() as session:
+        comm_b = session.execute(
+            select(CandidateCommunicationRecord).where(
+                CandidateCommunicationRecord.application_id == app_b_id
+            )
+        ).scalar_one_or_none()
+        assert comm_b is not None
+        assert comm_b.status == "draft"
+
+
+def test_target_reached_prevents_dispatch_and_interview_starts(
+    client: TestClient,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    _setup_offline_env(monkeypatch, tmp_path)
+    tenant = create_tenant(client)
+    _, headers_1, _, _ = create_candidate_through_invitation(client, tenant)
+    _, headers_2, _, _ = create_candidate_through_invitation(client, tenant)
+    policy_windows = _future_local_slots(count=2)
+    campaign_id = create_approved_campaign(
+        client,
+        tenant,
+        campaign_automation={
+            "response_deadline": (datetime.now(UTC) + timedelta(days=2)).isoformat(),
+            "interview_duration_minutes": 30,
+            "timezone_name": "Asia/Ho_Chi_Minh",
+            "proposed_windows": [
+                {
+                    "start": start.isoformat(),
+                    "end": (start + timedelta(minutes=30)).isoformat(),
+                }
+                for start in policy_windows
+            ],
+            "interviewer_user_id": tenant.recruiter["id"],
+            "exclusive_resources": [],
+        },
+    )
+
+    with SessionLocal.begin() as session:
+        camp = session.get(RecruitmentCampaignRecord, campaign_id)
+        obj = json.loads(camp.objective_json)
+        obj["target_headcount"] = 1
+        camp.objective_json = json.dumps(obj)
+
+    RecruitmentCampaignOrchestrator.start(
+        campaign_id,
+        TenantContext(
+            actor_user_id=tenant.recruiter["id"],
+            organization_id=tenant.organization_id,
+            role="recruiter",
+        ),
+    )
+
+    app_1, _, sched_1 = _prepare_candidate_with_worker(
+        client, tenant, campaign_id, headers_1, slot_index=0
+    )
+    app_2, _, sched_2 = _prepare_candidate_with_worker(
+        client, tenant, campaign_id, headers_2, slot_index=1
+    )
+
+    interview_1_id, _ = _complete_candidate_interview(
+        client, tenant, campaign_id, app_1, sched_1, headers_1
+    )
+    _record_hire(client, tenant, campaign_id, app_1)
+
+    progress = client.get(
+        f"/api/v1/recruitment-campaigns/{campaign_id}/progress",
+        headers=tenant_headers(tenant.recruiter_headers, tenant.organization_id),
+    ).json()
+    assert progress["objective_status"] == "target_achieved"
+    assert progress["qualifying_hires"] == 1
+    assert progress["remaining_hires"] == 0
+
+    start_2 = client.post(
+        f"/api/v1/interview/campaigns/{campaign_id}/applications/{app_2}/start",
+        json={"schedule_id": sched_2["id"], "mode": "text"},
+        headers=tenant_headers(headers_2, tenant.organization_id),
+    )
+    assert start_2.status_code == 409
+    assert "Campaign hiring target has already been achieved" in start_2.text
+
+    replay_1 = client.post(
+        f"/api/v1/interview/campaigns/{campaign_id}/applications/{app_1}/start",
+        json={"schedule_id": sched_1["id"], "mode": "text"},
+        headers=tenant_headers(headers_1, tenant.organization_id),
+    )
+    assert replay_1.status_code == 200
+    assert replay_1.json()["interview_id"] == interview_1_id
+
+    assert CandidateApplicationService.discover_eligible(10) == []
+    assert CandidateCommunicationService.discover_eligible(10) == []
+
+
+def test_expired_deadline_and_terminal_outcomes_do_not_busy_loop(
+    client: TestClient,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    _setup_offline_env(monkeypatch, tmp_path)
+    tenant = create_tenant(client)
+    campaign_id = create_approved_campaign(client, tenant)
+    execution = RecruitmentCampaignOrchestrator.start(
+        campaign_id,
+        TenantContext(
+            actor_user_id=tenant.recruiter["id"],
+            organization_id=tenant.organization_id,
+            role="recruiter",
+        ),
+    )
+    assert execution.status == "awaiting_progress"
+
+    past_date = (date.today() - timedelta(days=2)).isoformat()
+    with SessionLocal.begin() as session:
+        camp = session.get(RecruitmentCampaignRecord, campaign_id)
+        obj = json.loads(camp.objective_json)
+        obj["deadline"] = past_date
+        camp.objective_json = json.dumps(obj)
+
+    execution_id = _wake_execution(campaign_id)
+    reconciled = RecruitmentCampaignOrchestrator.run_dispatched(execution_id)
+    assert reconciled is not None
+    assert reconciled.status == "needs_attention"
+    assert reconciled.failure_code == "campaign_deadline_passed"
+    assert reconciled.available_at is None
+
+    eligible = RecruitmentCampaignOrchestrator.discover_eligible(10)
+    assert execution_id not in eligible
+
+    _, candidate_headers, _, _ = create_candidate_through_invitation(client, tenant)
+    uploaded = submit_cv(
+        client,
+        tenant,
+        candidate_headers,
+        campaign_id,
+        make_docx("Candidate for rejection"),
+    )
+    app_id = uploaded.json()["id"]
+
+    reject_res = client.post(
+        f"/api/v1/recruitment-campaigns/{campaign_id}/applications/{app_id}/outcome",
+        json={
+            "outcome": "rejected",
+            "criteria_satisfied": False,
+            "idempotency_key": f"reject-{app_id[:20]}",
+            "reason": "Does not meet required qualifications.",
+        },
+        headers=tenant_headers(tenant.org_admin_headers, tenant.organization_id),
+    )
+    assert reject_res.status_code == 201
+    assert RecruitmentCampaignOrchestrator.advance_application_once(app_id) is None
+
+
+def test_non_qualifying_outcomes_do_not_count_toward_headcount_target(
+    client: TestClient,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    _setup_offline_env(monkeypatch, tmp_path)
+    tenant = create_tenant(client)
+    _, candidate_headers, _, _ = create_candidate_through_invitation(client, tenant)
+    policy_windows = _future_local_slots(count=2)
+    campaign_id = create_approved_campaign(
+        client,
+        tenant,
+        campaign_automation={
+            "response_deadline": (datetime.now(UTC) + timedelta(days=2)).isoformat(),
+            "interview_duration_minutes": 30,
+            "timezone_name": "Asia/Ho_Chi_Minh",
+            "proposed_windows": [
+                {
+                    "start": start.isoformat(),
+                    "end": (start + timedelta(minutes=30)).isoformat(),
+                }
+                for start in policy_windows
+            ],
+            "interviewer_user_id": tenant.recruiter["id"],
+            "exclusive_resources": [],
+        },
+    )
+    RecruitmentCampaignOrchestrator.start(
+        campaign_id,
+        TenantContext(
+            actor_user_id=tenant.recruiter["id"],
+            organization_id=tenant.organization_id,
+            role="recruiter",
+        ),
+    )
+
+    app_id, _, sched = _prepare_candidate_with_worker(
+        client, tenant, campaign_id, candidate_headers, slot_index=0
+    )
+    _complete_candidate_interview(
+        client, tenant, campaign_id, app_id, sched, candidate_headers
+    )
+
+    progress = client.get(
+        f"/api/v1/recruitment-campaigns/{campaign_id}/progress",
+        headers=tenant_headers(tenant.recruiter_headers, tenant.organization_id),
+    ).json()
+    assert progress["qualifying_hires"] == 0
+    assert progress["objective_status"] == "active"
+
+    outcome_res = client.post(
+        f"/api/v1/recruitment-campaigns/{campaign_id}/applications/{app_id}/outcome",
+        json={
+            "outcome": "hired",
+            "criteria_satisfied": False,
+            "idempotency_key": f"hire-unsatisfied-{app_id[:16]}",
+            "reason": "Hired without satisfying criteria.",
+        },
+        headers=tenant_headers(tenant.org_admin_headers, tenant.organization_id),
+    )
+    assert outcome_res.status_code == 201
+
+    progress2 = client.get(
+        f"/api/v1/recruitment-campaigns/{campaign_id}/progress",
+        headers=tenant_headers(tenant.recruiter_headers, tenant.organization_id),
+    ).json()
+    assert progress2["qualifying_hires"] == 0
+    assert progress2["remaining_hires"] == 2
+
