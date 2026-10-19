@@ -773,6 +773,13 @@ class CandidateCommunicationService:
                         RecruitmentCampaignRecord.approval_state == "approved",
                     ),
                     ~exists().where(
+                        RecruitmentCampaignExecutionRecord.campaign_id
+                        == CandidateCommunicationRecord.campaign_id,
+                        RecruitmentCampaignExecutionRecord.organization_id
+                        == CandidateCommunicationRecord.organization_id,
+                        RecruitmentCampaignExecutionRecord.status == "completed",
+                    ),
+                    ~exists().where(
                         RecruitmentCampaignWorkerControlRecord.id
                         == CAMPAIGN_WORKER_CONTROL_ID,
                         RecruitmentCampaignWorkerControlRecord.paused.is_(True),
