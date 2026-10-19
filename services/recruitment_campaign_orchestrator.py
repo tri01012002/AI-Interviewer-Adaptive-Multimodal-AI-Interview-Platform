@@ -493,7 +493,19 @@ class RecruitmentCampaignOrchestrator:
 
         advanced: list[CampaignAdvancementResponse] = []
         for application_id in application_ids:
-            result = cls.advance_application_once(application_id)
+            # One application's rejected handoff must not block the others:
+            # it stays in its current stage and is retried on a later tick.
+            try:
+                result = cls.advance_application_once(application_id)
+            except HTTPException as exc:
+                logger.warning(
+                    "Recruitment application advancement skipped",
+                    extra={
+                        "application_id": application_id,
+                        "status_code": exc.status_code,
+                    },
+                )
+                continue
             if result is not None:
                 advanced.append(result)
                 if len(advanced) >= limit:

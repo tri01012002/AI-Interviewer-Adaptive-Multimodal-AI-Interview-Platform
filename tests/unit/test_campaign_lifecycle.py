@@ -679,10 +679,9 @@ def test_version_change_and_stale_claim_commit_fencing(
 
     from services.candidate_screening import CandidateScreeningResult
     screening = CandidateScreeningResult(
-        application_id=app_id,
+        rubric_version="stale-claim-rubric",
+        rubric_snapshot=[],
         assessments=[],
-        confidence=1.0,
-        decision="advance",
     )
     stale_result = CandidateApplicationService._persist_screening(
         app_id,
@@ -1026,6 +1025,20 @@ def test_expired_deadline_and_terminal_outcomes_do_not_busy_loop(
         make_docx("Candidate for rejection"),
     )
     app_id = uploaded.json()["id"]
+    # Outcomes require a human-reviewed screening first.
+    processed = CandidateApplicationService.process_dispatched(app_id)
+    assert processed is not None and processed.status == "needs_review"
+    reviewed = client.post(
+        f"/api/v1/recruitment-applications/{app_id}/review",
+        json={
+            "criteria": [
+                {"criterion_id": item["criterion_id"], "status": "confirmed"}
+                for item in processed.screening["assessments"]
+            ]
+        },
+        headers=tenant_headers(tenant.org_admin_headers, tenant.organization_id),
+    )
+    assert reviewed.status_code == 200, reviewed.text
 
     reject_res = client.post(
         f"/api/v1/recruitment-campaigns/{campaign_id}/applications/{app_id}/outcome",
