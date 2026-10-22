@@ -151,6 +151,10 @@ class CandidateApplicationService:
                         updated_at=now,
                     )
                 )
+                # The models declare no relationship(), so the unit of work does
+                # not order these INSERTs; PostgreSQL enforces the CV document's
+                # foreign key to the application, SQLite does not.
+                session.flush()
                 session.add(
                     CandidateCVDocumentRecord(
                         id=str(uuid4()),

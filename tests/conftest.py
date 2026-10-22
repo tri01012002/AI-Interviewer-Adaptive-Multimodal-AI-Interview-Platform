@@ -89,6 +89,24 @@ def pytest_configure() -> None:
     except Exception as exc:
         raise pytest.UsageError("DATABASE_URL is not a valid SQLAlchemy URL.") from exc
 
+    if url.drivername.startswith("postgresql"):
+        _validate_disposable_postgres(url)
+        return
     if url.drivername != "sqlite" or not url.database:
         raise pytest.UsageError("Pytest requires an isolated SQLite DATABASE_URL.")
     _validate_database_path(url.database)
+
+
+def _validate_disposable_postgres(url) -> None:
+    if os.environ.get("RUN_POSTGRES_TESTS") != "1":
+        raise pytest.UsageError(
+            "PostgreSQL test runs require the explicit RUN_POSTGRES_TESTS=1 opt-in."
+        )
+    if url.host not in {"127.0.0.1", "localhost", "::1"}:
+        raise pytest.UsageError(
+            "PostgreSQL tests may only use a disposable server on the loopback interface."
+        )
+    if not url.database or not url.database.startswith("test_"):
+        raise pytest.UsageError(
+            "PostgreSQL test database names must start with test_ (disposable databases only)."
+        )
