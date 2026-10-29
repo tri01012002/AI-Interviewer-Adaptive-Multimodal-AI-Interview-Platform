@@ -7,71 +7,12 @@ from math import isfinite
 from pathlib import Path
 from typing import Any, Optional
 
-from pydantic import Field, field_validator
-from pydantic_settings import (
-    BaseSettings,
-    DotEnvSettingsSource,
-    PydanticBaseSettingsSource,
-    SettingsConfigDict,
-)
-
-
-_PROJECT_ROOT = Path(__file__).resolve().parents[1]
-_LEGACY_DOTENV_KEYS = frozenset(
-    {
-        "OPENAI_API_KEY",
-        "SENTRY_ENVIRONMENT",
-        "SENTRY_TRACES_SAMPLE_RATE",
-        "PROMETHEUS_PORT",
-        "PROMETHEUS_ENABLED",
-        "RETRIEVAL_TEMPERATURE",
-        "RERANKER_MODEL",
-        "CORS_ORIGINS",
-        "RATE_LIMIT_ENABLED",
-        "RATE_LIMIT_REQUESTS",
-        "RATE_LIMIT_PERIOD",
-        "BROWSER_AGENT_ENABLED",
-        "BROWSER_HEADLESS",
-        "BROWSER_TIMEOUT",
-        "BROWSER_ALLOWED_DOMAINS",
-        "EVALUATION_ENABLED",
-        "SYNTHETIC_DATASET_SIZE",
-        "GOLDEN_DATASET_PATH",
-        "REGRESSION_BASELINE",
-        "DOCKER_REGISTRY",
-        "DOCKER_IMAGE_TAG",
-        "KUBERNETES_NAMESPACE",
-        "KUBERNETES_ENVIRONMENT",
-        "LOG_FORMAT",
-        "LOG_FILE",
-        "DEBUG_SQL",
-        "DEBUG_RAG",
-        "SENTRY_DEBUG",
-    }
-)
-
-
-class _LegacyAwareDotEnvSettingsSource(DotEnvSettingsSource):
-    """Ignore known obsolete local dotenv keys while rejecting new typos."""
-
-    def __call__(self) -> dict[str, Any]:
-        data = super().__call__()
-        field_names = self.settings_cls.model_fields
-        unsupported = sorted(
-            key
-            for key in data
-            if key not in field_names and key not in _LEGACY_DOTENV_KEYS
-        )
-        if unsupported:
-            raise ValueError(
-                "Unsupported .env variables: " + ", ".join(unsupported)
-            )
-        for key in _LEGACY_DOTENV_KEYS:
-            data.pop(key, None)
-        return data
+from pydantic import Field, SecretStr
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
+    model_config = SettingsConfigDict(env_file=".env", case_sensitive=True)
     """Application settings"""
 
     model_config = SettingsConfigDict(
@@ -184,7 +125,7 @@ class Settings(BaseSettings):
     ANTHROPIC_MODEL: str = "claude-3-opus-20240229"
 
     # Embeddings
-    EMBEDDING_PROVIDER: str = "openai"
+    EMBEDDING_PROVIDER: str = "none"
     EMBEDDING_MODEL: str = "text-embedding-3-small"
     EMBEDDING_DIMENSION: int = 1536
     EMBEDDING_TIMEOUT_SECONDS: float = 10.0
@@ -254,31 +195,28 @@ class Settings(BaseSettings):
     CELERY_TASK_TRACK_STARTED: bool = True
     CELERY_TASK_TIME_LIMIT: int = 3600
 
+    # Recruitment campaign database dispatcher
+    CAMPAIGN_WORKER_POLL_SECONDS: float = Field(default=2.0, gt=0, le=60)
+    CAMPAIGN_WORKER_CONCURRENCY: int = Field(default=2, ge=1, le=32)
+    CAMPAIGN_WORKER_RETRY_BASE_SECONDS: int = Field(default=5, ge=1, le=3600)
+    CAMPAIGN_WORKER_RETRY_MAX_SECONDS: int = Field(default=300, ge=1, le=86400)
+    CAMPAIGN_WORKER_LEASE_SECONDS: int = Field(default=120, ge=10, le=3600)
+
+    # Email delivery is simulated unless an operator explicitly selects SMTP.
+    EMAIL_PROVIDER: str = "offline_simulation"
+    EMAIL_SMTP_HOST: str = ""
+    EMAIL_SMTP_PORT: int = Field(default=587, ge=1, le=65535)
+    EMAIL_SMTP_USERNAME: str = ""
+    EMAIL_SMTP_PASSWORD: SecretStr = SecretStr("")
+    EMAIL_SMTP_FROM: str = ""
+    EMAIL_SMTP_TIMEOUT_SECONDS: float = Field(default=10.0, gt=0, le=30)
+
     # Storage
     STORAGE_TYPE: str = "local"
     STORAGE_PATH: str = "./storage"
+    CV_STORAGE_PATH: str = "storage/private_cv"
+    CV_MAX_UPLOAD_BYTES: int = Field(default=5 * 1024 * 1024, gt=0, le=25 * 1024 * 1024)
 
-    @field_validator("LLM_PROVIDER")
-    @classmethod
-    def validate_llm_provider(cls, value: str) -> str:
-        provider = value.strip().lower()
-        if provider not in {"none", "openai", "ollama"}:
-            raise ValueError("LLM_PROVIDER must be one of: 'none', 'openai', 'ollama'")
-        return provider
-
-    @field_validator("LLM_TIMEOUT_SECONDS")
-    @classmethod
-    def validate_finite_llm_timeout(cls, value: float) -> float:
-        if not isfinite(value):
-            raise ValueError("LLM_TIMEOUT_SECONDS must be finite")
-        return value
-
-    @field_validator("OPENAI_MODEL", "OPENAI_BASE_URL")
-    @classmethod
-    def validate_non_empty_llm_setting(cls, value: str) -> str:
-        if not value.strip():
-            raise ValueError("LLM model and base URL must not be empty")
-        return value
 
 
 @lru_cache()

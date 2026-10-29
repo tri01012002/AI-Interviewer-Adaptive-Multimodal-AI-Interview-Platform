@@ -9,6 +9,8 @@ def test_settings_do_not_enable_known_password_admin_bootstrap_by_default(monkey
     monkeypatch.delenv("ENABLE_DEV_ADMIN_BOOTSTRAP", raising=False)
     monkeypatch.delenv("BOOTSTRAP_ADMIN_EMAIL", raising=False)
     monkeypatch.delenv("BOOTSTRAP_ADMIN_PASSWORD", raising=False)
+    monkeypatch.delenv("LLM_PROVIDER", raising=False)
+    monkeypatch.delenv("EMBEDDING_PROVIDER", raising=False)
 
     settings = Settings(_env_file=None)
 
@@ -16,6 +18,8 @@ def test_settings_do_not_enable_known_password_admin_bootstrap_by_default(monkey
     assert settings.ENABLE_DEV_ADMIN_BOOTSTRAP is False
     assert settings.BOOTSTRAP_ADMIN_EMAIL == ""
     assert settings.BOOTSTRAP_ADMIN_PASSWORD == ""
+    assert settings.LLM_PROVIDER == "none"
+    assert settings.EMBEDDING_PROVIDER == "none"
 
 
 def test_explicit_dev_bootstrap_requires_operator_supplied_credentials(monkeypatch):

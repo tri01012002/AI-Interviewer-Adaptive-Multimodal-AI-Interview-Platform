@@ -41,6 +41,7 @@ def test_report_uses_persisted_assessments_and_evidence(tmp_path):
             InterviewRecord(
                 id=interview_id,
                 candidate_id="synthetic-candidate",
+                organization_id="synthetic-organization",
                 position="Backend Engineer",
                 mode="text",
                 current_question="Follow-up question",
@@ -146,6 +147,7 @@ def test_report_uses_persisted_assessments_and_evidence(tmp_path):
         "synthetic-candidate",
         interview_id,
         {"overall_score": 0, "skills": {"invented": {"score": 5}}},
+        organization_id="synthetic-organization",
     )
 
     assert report["is_final"] is True
@@ -196,6 +198,7 @@ def test_report_marks_failed_or_incomplete_interview_without_fake_evaluation(tmp
             InterviewRecord(
                 id="interview-partial",
                 candidate_id="synthetic-candidate",
+                organization_id="synthetic-organization",
                 position="Backend Engineer",
                 mode="text",
                 current_question="Initial question",
@@ -214,7 +217,11 @@ def test_report_marks_failed_or_incomplete_interview_without_fake_evaluation(tmp
             )
         )
 
-    report = reports.build_report("synthetic-candidate", "interview-partial")
+    report = reports.build_report(
+        "synthetic-candidate",
+        "interview-partial",
+        organization_id="synthetic-organization",
+    )
 
     assert report["is_final"] is False
     assert report["completion_status"] == "active"
@@ -308,4 +315,18 @@ def test_report_does_not_label_unquoted_evaluator_text_as_answer_evidence(tmp_pa
     assert detail["answer_quote"] == "I used Python in a service."
     assert detail["evidence_quotes"] == []
     assert report["supporting_evidence"] == []
+    engine.dispose()
+
+
+def test_report_write_failure_does_not_leave_partial_export(tmp_path, monkeypatch):
+    engine, _factory, reports = _report_service(tmp_path)
+
+    def fail_replace(*_args, **_kwargs):
+        raise OSError("synthetic atomic promotion failure")
+
+    monkeypatch.setattr("services.report_service.os.replace", fail_replace)
+    with pytest.raises(OSError, match="synthetic atomic promotion failure"):
+        reports.write_report({"synthetic": "report"})
+
+    assert list(reports.output_dir.iterdir()) == []
     engine.dispose()

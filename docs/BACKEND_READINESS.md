@@ -1,25 +1,26 @@
 # Backend Readiness Assessment
 
-**Scope:** Backend-only, bounded offline verification and a focused startup-safety fix.
-**Overall:** Offline regression evidence is positive; live AI and production readiness remain **BLOCKED**.
+**Scope:** Backend-only runtime verification without external AI and a focused readiness-probe fix.
+**Overall:** Offline API workflows and a limited PostgreSQL smoke passed; multi-tenant and production readiness remain **BLOCKED**.
 
 ## Executive summary
 
-- The backend and UI are separate Git repositories. Work was confined to the backend repository; the UI worktree was clean and unchanged. No commits were created.
-- Existing P0.1–P0.6 work was preserved. The backend still contains the prior milestone's uncommitted changes.
-- Development/test startup previously enabled an administrator with an in-source, known password by default. This was reproduced by a failing regression test and fixed: bootstrap is now opt-in, credentials default to empty, and local API binding defaults to loopback.
+- The backend and UI are separate Git repositories. Work was confined to the backend repository on `p0-11-authorized-ci-verification`; the UI remained clean on `master`. No commits were created.
+- Existing uncommitted provider and readiness work was preserved. This phase added only the health-readiness fix and regression coverage.
+- A real Uvicorn process started without an AI key. Authentication, ownership, invitation redemption, interview answer/replay, result, and report APIs passed against an isolated PostgreSQL database and Redis.
+- The first live `/health/ready` check returned `503` because the probe treated SQLAlchemy's `Engine` as a context manager. The probe now opens a connection and disposes the engine explicitly; a regression test covers both successful and failing database probes.
 - Database-filtered per-recruiter and candidate-self authorization, report gating, and HTTP/WebSocket interview ownership checks exist and passed the focused offline regression run.
 - There is no organization membership model and no production recruiter-to-candidate account-linking workflow. Do not use the system for multi-company customer data.
-- No provider credentials, live-test opt-ins, or `.env` file are present. No live requests were made. Live evaluation, semantic embeddings, and provider-backed E2E remain **BLOCKED**.
-- The complete test suite was not run. CI currently has unbounded test commands and suppresses failures in several checks.
+- `LLM_PROVIDER=none`, `EMBEDDING_PROVIDER=none`, and an empty `OPENAI_API_KEY` were used. No external AI-provider request was made; the result was labeled `deterministic`.
+- The complete suite and production deployment were not verified. The PostgreSQL checks were bounded to a fresh migration and local API smoke, not a production or multi-instance certification.
 
 ## Repository boundary and change preservation
 
 | Check | Result |
 |---|---|
-| Backend repository | `D:\cac\AI-Interviewer-Adaptive-Multimodal-AI-Interview-Platform`, branch `main`, origin is the backend repository. |
-| UI repository | `D:\cac\AI_platform_UI`, branch `master`, origin is the UI repository. |
-| UI worktree | Clean before and after this work; not modified. |
+| Backend repository | `D:\cac\AI-Interviewer-Adaptive-Multimodal-AI-Interview-Platform`, branch `p0-11-authorized-ci-verification`. |
+| UI repository | `D:\cac\AI_platform_UI`, branch `master`; clean and not modified. |
+| Existing backend work | Preserved, including pre-existing offline-provider edits; this phase added the readiness fix and its tests. |
 | Existing backend work | P0.1–P0.6 changes remain in the worktree and were not reverted. |
 | Commits or pushes | None. |
 
@@ -44,7 +45,7 @@
 - Unknown, malformed, expired, consumed, revoked, and email-mismatched tokens return the same safe `400` response. Ownership violations return `404`; unauthorized roles return `403`; eligibility conflicts return `409`; bounded-rate violations return `429`. Public endpoints do not expose whether an unrelated user's email exists.
 - The existing unique candidate `user_id` constraint prevents one account being linked to multiple profiles. Candidate email remains unique, and the redemption transaction also requires the stored profile email, invitation email, verified account email, and recruiter ownership to agree. A second claim of a profile is rejected by a conditional update.
 - The new migration adds nullable `users.email_verified_at` and invitation storage without assigning owners or links to legacy candidates. No admin API for legacy ownership assignment is provided. For each legacy row, an operator must independently establish the correct recruiter through authoritative records, take a backup, use a reviewed maintenance transaction to set `candidates.owner_user_id` and insert a matching `access_audit` event, and verify both values before restoring service. Never infer ownership from name or email alone; leave unresolved rows unassigned.
-- The authentication and profile-link flow is implemented and locally tested with SQLite. Email verification is an explicit manual dependency, token delivery is operational/out-of-band, and PostgreSQL transaction/locking behavior still requires controlled verification before production use.
+- The authentication and profile-link flow is tested with SQLite and received a limited isolated PostgreSQL API smoke. Email verification is an explicit manual dependency, token delivery is operational/out-of-band, and production PostgreSQL transaction/locking behavior still requires controlled verification.
 - RAG filters exclude scoped documents when a request is unscoped, but they are retrieval filters, not an API authorization boundary. Organization metadata must not be treated as authenticated tenant identity.
 - **Supported boundary:** controlled, isolated single-tenant synthetic demo only. **Not supported:** multi-tenant demo or production customer data.
 
@@ -133,6 +134,11 @@ $dbFile = "storage\test_backend_readiness_$runId.db"
 if (Test-Path -LiteralPath $dbFile) { throw "Refusing to reuse test database: $dbFile" }
 $env:DATABASE_URL = "sqlite:///./" + ($dbFile -replace '\\', '/')
 $env:ENVIRONMENT = "test"
+$env:LLM_PROVIDER = "none"
+$env:EMBEDDING_PROVIDER = "none"
+$env:OPENAI_API_KEY = ""
+$env:RUN_LIVE_AI_TESTS = "0"
+$env:RUN_LIVE_AI_E2E = "0"
 $env:ENABLE_DEV_ADMIN_BOOTSTRAP = "false"
 .\.venv\Scripts\python.exe -m alembic upgrade head
 if ($LASTEXITCODE -ne 0) { throw "Isolated test database migration failed." }
@@ -157,3 +163,144 @@ The pytest safety guard accepts this `storage\test_*.db` URL and rejects missing
 3. Complete organization membership, tenant-scoped database queries, migrations, and cross-organization tests before any multi-tenant use.
 4. Have an authorized operator run P0.6 live smoke/E2E verification with a dedicated SQLite database and the documented spend cap; require human review of the six real outputs.
 5. Verify PostgreSQL and deployment configuration in a controlled environment before production use.
+
+## Offline provider implementation follow-up
+
+### Audit findings and priorities
+
+The active branch had a clean worktree before this follow-up. The current request-path architecture
+already includes interview ownership checks, durable/idempotent turn processing, candidate
+invitation redemption, reporting, and deterministic evaluation; those features were preserved.
+`CURRENT_STATE_AUDIT.md` is an older snapshot and does not reflect these completed changes. The
+current readiness evidence and source/tests were used instead. The separate `AI_platform_UI`
+repository was not modified.
+
+Prioritized work based on that audit:
+
+1. **P0 — Make provider selection fail closed.** An explicit OpenAI selection without a key
+   previously returned no provider and silently enabled deterministic behavior. OpenAI embeddings
+   similarly defaulted on while an absent key quietly disabled dense retrieval.
+2. **P1 — Make no-key operation explicit and safe.** Default both model and embedding providers to
+   `none`; provide an opt-in deterministic fixture provider for offline integration work.
+3. **P1 — Label fixture outputs.** Identify question source in interview state and label mock
+   evaluations and their rationale so synthetic scores/feedback cannot be mistaken for AI output.
+4. **P1 — Regression-test offline/provider configuration and preserve core flows.** Keep tests
+   independent of credentials and external AI requests.
+5. **Open release blockers — Complete organization/tenant authorization and operational
+   verification/delivery for email and invitations; run controlled PostgreSQL and production
+   verification.** These are not safe to solve by changing existing auth or schema in this scoped
+   offline-provider change. Frontend loading/error/expired-session work belongs to the separate UI
+   repository and remains out of scope.
+
+### Implemented behavior
+
+- `LLM_PROVIDER=none` remains the default and uses the existing deterministic graph and evaluator.
+- `LLM_PROVIDER=mock` selects fixed structured fixtures; mock questions are visibly prefixed,
+  interview state includes `question_source=mock`, and mock evaluations use
+  `evaluator_type=mock` and state that the score is not a candidate assessment.
+- `LLM_PROVIDER=openai` without `OPENAI_API_KEY`, an unknown LLM provider, and
+  `EMBEDDING_PROVIDER=openai` without `OPENAI_API_KEY` now raise explicit configuration errors.
+  They do not silently switch to local/mock behavior.
+- `EMBEDDING_PROVIDER=none` is the default and preserves the already-labeled lexical-only RAG
+  fallback. Voice provider defaults remain fake. No API key is needed by default.
+- No authentication, database schema, invitation API contract, or UI repository was changed.
+
+### Validation for this follow-up
+
+All runs use the Python 3.11.9 environment, an isolated SQLite test database, `LLM_PROVIDER=none`,
+`EMBEDDING_PROVIDER=none`, empty `OPENAI_API_KEY`, and disabled live-test flags. No external AI
+request is made.
+
+| Command | Result |
+|---|---|
+| Baseline: `pytest tests/unit/test_llm_provider.py tests/unit/test_adaptive_graph.py tests/unit/test_semantic_evaluation.py tests/unit/test_rag_semantic_retrieval.py -q` | **37 passed, 1 skipped** before changes. The skip is the opt-in live embedding check. |
+| Post-change core offline regressions: 16 focused unit files covering provider, graph, evaluator, RAG, bootstrap defaults, API, auth, candidate invitations, authorization, reporting, turn state, and database integrity | **98 passed, 1 skipped** in 25.54s. The skip is an opt-in live embedding test. |
+| Live-provider smoke/E2E with `RUN_LIVE_AI_TESTS=0`, `RUN_LIVE_AI_E2E=0`, and empty `OPENAI_API_KEY` | **4 skipped** in 0.26s; three smoke tests and one E2E test skipped before any provider request. |
+| Pylance Problems for all changed Python files | **No errors found.** |
+| `git diff --check` | **Passed.** |
+| Full suite and PostgreSQL verification | Not claimed by this follow-up. |
+
+Pytest also emitted existing environment/configuration warnings for the missing `pytest-timeout`
+plugin, Pydantic class-based settings, `python-multipart` import naming, and FastAPI `on_event`
+deprecation. These are not test failures and were not changed here.
+
+The exact offline test setup and no-key API commands are documented in the root README and this
+assessment's safe-operator commands. Remaining blockers above must be resolved before production
+or multi-tenant use.
+
+## Runtime Verification and Workflow Hardening (2026-10-12)
+
+### Runtime configuration and result
+
+- Environment: Windows, repository `.venv`, Python 3.11.9; no repository `.env` was used.
+- Providers: `LLM_PROVIDER=none`, `EMBEDDING_PROVIDER=none`, `OPENAI_API_KEY=""`, and live AI flags disabled.
+- Dependencies: Redis 7.2.16 and PostgreSQL 15.19. The API used a newly created, isolated PostgreSQL database migrated to `b6c9_candidate_invitations`; that database was removed after verification.
+- The local development admin bootstrap was explicitly enabled with throwaway credentials in the Uvicorn process environment. No credentials or invitation tokens were written to this document or logged.
+- Uvicorn command:
+
+  ```powershell
+  .\.venv\Scripts\python.exe -m uvicorn apps.api.main:app --host 127.0.0.1 --port 8000
+  ```
+
+- Startup logs showed `Application startup complete` and the loopback Uvicorn listener.
+
+| Check | Result |
+|---|---|
+| `GET /health` | `200`, status `ok` |
+| `GET /health/live` | `200`, alive |
+| `GET /health/ready` before fix | `503`; the database probe raised `TypeError` by using `with create_engine(...)`. |
+| `GET /health/ready` after fix | `200`, database and Redis both `true` |
+| Alembic on fresh PostgreSQL database | Passed through revision `b6c9_candidate_invitations` |
+| Live PostgreSQL/Redis API smoke | Passed: admin/candidate/recruiter auth, anonymous denial, public role-escalation rejection, recruiter candidate creation, interview creation, pre-link denial, manual email attestation, invitation creation/redemption/reuse rejection, cross-user denial, answer submission/replay, persisted result, and report retrieval |
+| Concurrent duplicate answer requests against PostgreSQL | Both requests returned `200`; a database query found exactly one durable matching turn |
+
+The readiness fix explicitly opens and closes the SQLAlchemy connection and disposes the engine
+in a `finally` block. The live smoke used the application's deterministic evaluator and lexical
+retrieval only; it did not contact an AI provider.
+
+### Tests and limits
+
+The final focused command covered readiness, invitation expiry/reuse/ownership, interview
+idempotency/recovery, resource authorization, API results, reports, migration safety, and security
+defaults:
+
+```powershell
+python -m pytest tests\unit\test_api_readiness.py tests\unit\test_candidate_invitations.py tests\unit\test_interview_hardening.py tests\unit\test_resource_authorization.py tests\unit\test_api_interview.py tests\unit\test_report_service.py tests\unit\test_candidate_invitation_migration.py tests\unit\test_security_defaults.py -q -rs
+```
+
+Result: **41 passed, 0 failed, 0 skipped**, with six existing deprecation warnings. The test harness
+requires SQLite, so this was not presented as a PostgreSQL pytest run. PostgreSQL validation here
+consisted of the real Alembic upgrade and live API/concurrent-submission smoke above. The full
+repository suite and production/multi-process deployment were not run.
+
+### Frontend/API boundary
+
+The separate `AI_platform_UI` repository was not changed. Frontend callers should account for:
+
+- `GET /api/v1/interviews` returns an empty array when there are no visible interviews.
+- Missing, invalid, or expired bearer authentication returns `401`; an authenticated but
+  role-forbidden operation returns `403`. Cross-owner or otherwise invisible resources return
+  `404` rather than disclosing their existence.
+- Invalid payloads return `422`; turn conflicts or an in-progress duplicate return `409`.
+  Retry an interrupted answer with the **same** `turn_id` and answer. A completed duplicate replays
+  the stored result.
+- Temporary evaluation or Redis-lock unavailability returns `503`; bounded invitation throttles
+  return `429`.
+- Unknown, malformed, expired, consumed, revoked, and account-mismatched invitation tokens all
+  return the same `400` response: `Invitation is invalid or unavailable`. The API intentionally
+  does not distinguish an expired invitation from a bad or already-used token.
+- Interview and report requests are synchronous; the UI needs its own loading state. The API
+  provides no distinct invitation-expired response or server-driven loading state. The configured
+  access-token expiry is 30 minutes and should be handled as an authentication `401`.
+- Offline evaluations are deterministic development signals, not real AI assessments. Keep the
+  returned evaluator/question-source labels visible wherever scores, feedback, or questions are
+  shown.
+
+### Remaining priority
+
+Per-user ownership is exercised, but there is no authenticated organization membership or tenant
+identity in the schema. The supported boundary remains an isolated, single-tenant synthetic demo;
+cross-company use is unsafe. The next security task should define the organization/membership model,
+tenant identity source, migration/backfill policy, and cross-tenant authorization tests before
+changing schema or route contracts. Production email verification and controlled invitation delivery
+also remain operational dependencies.

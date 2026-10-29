@@ -3,14 +3,10 @@ import json
 import httpx
 import pytest
 
-from agents.interview_agent.graph import (
-    AnswerAnalysis,
-    InterviewAgentCore,
-    QuestionPlanningError,
-    QuestionProposal,
-)
-from config import settings
+from agents.interview_agent.graph import AnswerAnalysis, InterviewAgentCore, QuestionProposal
+from evaluation.service import LLMEvaluator, Rubric
 from integrations.llm_providers.provider import (
+    DeterministicMockProvider,
     LLMConfigurationError,
     LLMInvalidOutputError,
     LLMTimeoutError,
@@ -167,59 +163,50 @@ def test_provider_factory_requires_explicit_provider_and_key():
     assert provider_from_settings(Settings()) is None
 
 
-def test_provider_factory_requires_key_when_openai_is_selected():
+def test_provider_factory_rejects_explicit_openai_without_credentials():
     class Settings:
         LLM_PROVIDER = "openai"
+        OPENAI_API_KEY = " "
+
+    with pytest.raises(LLMConfigurationError, match="requires OPENAI_API_KEY"):
+        provider_from_settings(Settings())
+
+
+def test_provider_factory_rejects_unknown_provider():
+    class Settings:
+        LLM_PROVIDER = "deepseek"
         OPENAI_API_KEY = ""
 
-    with pytest.raises(LLMConfigurationError, match="OPENAI_API_KEY is required"):
+    with pytest.raises(LLMConfigurationError, match="Unsupported LLM_PROVIDER"):
         provider_from_settings(Settings())
 
 
-def test_provider_factory_rejects_unsupported_provider():
+def test_deterministic_mock_outputs_are_labeled_and_reproducible():
     class Settings:
-        LLM_PROVIDER = "invalid_provider"
-        OPENAI_API_KEY = "test-key"
-
-    with pytest.raises(LLMConfigurationError, match="Supported providers: none, openai, ollama"):
-        provider_from_settings(Settings())
-
-
-def test_provider_factory_builds_configured_openai_provider_without_network_request():
-    class Settings:
-        LLM_PROVIDER = "OPENAI"
-        OPENAI_API_KEY = "test-key"
-        OPENAI_MODEL = "test-model"
-        OPENAI_BASE_URL = "https://example.test/v1"
-        LLM_TIMEOUT_SECONDS = 12.0
-        LLM_MAX_RETRIES = 0
-        OPENAI_MAX_TOKENS = 900
-        OPENAI_TEMPERATURE = 0.1
+        LLM_PROVIDER = "mock"
+        OPENAI_API_KEY = ""
 
     provider = provider_from_settings(Settings())
-
-    assert isinstance(provider, OpenAIProvider)
-    assert provider.model == "test-model"
-    assert provider.settings.timeout_seconds == 12.0
-    assert provider.settings.max_retries == 0
-
-
-def test_service_surfaces_provider_configuration_failure_as_planning_error(monkeypatch):
-    def fail_factory(_settings):
-        raise LLMConfigurationError("OPENAI_API_KEY is required when LLM_PROVIDER is set to openai")
-
-    monkeypatch.setattr(interview_service_module, "provider_from_settings", fail_factory)
-    monkeypatch.setattr(settings, "REDIS_URL", "")
-    service = InterviewService(
-        evaluator=object(),
-        rag=object(),
-        interview_repository=object(),
-        turn_repository=object(),
-        evaluation_repository=object(),
+    assert isinstance(provider, DeterministicMockProvider)
+    agent = InterviewAgentCore(llm_provider=provider)
+    initial_state = agent.start_interview("candidate", "AI Engineer")
+    result = agent.handle_answer(initial_state, "I used Python to build a service.")
+    repeated = agent.handle_answer(initial_state, "I used Python to build a service.")
+    evaluation = LLMEvaluator(provider).evaluate(
+        "Describe your work.",
+        "I used Python to build a service.",
+        "python",
+        Rubric(competency="python"),
     )
 
-    with pytest.raises(QuestionPlanningError, match="OPENAI_API_KEY is required"):
-        service._plan_questions("AI Engineer", "Synthetic JD", "Synthetic resume")
+    assert initial_state["question_source"] == "deterministic"
+    assert result["question_source"] == "mock"
+    assert result["current_question"].startswith("[MOCK QUESTION - NOT AI-GENERATED]")
+    assert repeated["current_question"] == result["current_question"]
+    assert evaluation.assessment.evaluator_type == "mock"
+    assert evaluation.assessment.evaluator_version == "offline-fixture-v1"
+    assert evaluation.assessment.score == 0
+    assert "not a candidate assessment" in evaluation.assessment.rationale
 
 
 def test_graph_uses_fake_provider_for_answer_and_question_with_untrusted_boundaries():
@@ -235,4 +222,5 @@ def test_graph_uses_fake_provider_for_answer_and_question_with_untrusted_boundar
     assert "UNTRUSTED_CANDIDATE_CONTENT" in fake.calls[0][1]
     assert "UNTRUSTED_RETRIEVED_CONTEXT" in fake.calls[1][1]
     assert "Ignore previous instructions" in fake.calls[0][1]
+    assert result["question_source"] == "fake"
     assert "provider" not in result["errors"]

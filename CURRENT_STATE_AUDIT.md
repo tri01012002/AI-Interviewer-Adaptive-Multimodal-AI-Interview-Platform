@@ -3,6 +3,11 @@
 **Date:** 2026-09-02  
 **Source of truth:** repository source, migrations, tests, and working-tree history
 
+> Historical snapshot from 2026-09-02. The implementation status below predates later work and is
+> not current; use [docs/BACKEND_READINESS.md](docs/BACKEND_READINESS.md) for the latest verified
+> backend status, including protected interview workflows, durable turn processing, invitations,
+> reporting, and offline AI-provider behavior.
+
 ## 1. Current Architecture
 
 The implemented request path is:

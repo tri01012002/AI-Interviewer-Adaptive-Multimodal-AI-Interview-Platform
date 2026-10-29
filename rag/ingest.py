@@ -2,13 +2,11 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
-from rag.corpus_loader import load_demo_corpus
-from rag.indexed_corpus_loader import load_indexed_documents
-from rag.service import DocumentChunk, SQLAlchemyVectorStore, configured_embedding_provider
-
-INDEXED_DOCUMENTS_PATH = Path(__file__).resolve().parent / "documents" / "indexed"
+from rag.corpus_loader import (
+    DEMO_CORPUS_GLOBAL_APPROVAL_REFERENCE,
+    load_demo_corpus,
+)
+from rag.service import SQLAlchemyVectorStore, configured_embedding_provider
 
 
 def ingest_demo_corpus() -> tuple[int, int, str]:
@@ -38,6 +36,7 @@ def _ingest_documents(
         documents,
         provider,
         replace_source=True,
+        global_approval_reference=DEMO_CORPUS_GLOBAL_APPROVAL_REFERENCE,
     )
     if lexical_only:
         capability = "lexical-only: embedding disabled by request"

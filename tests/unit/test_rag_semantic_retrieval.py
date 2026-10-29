@@ -9,6 +9,7 @@ from sqlalchemy.orm import sessionmaker
 from config import settings
 from rag.corpus_loader import load_demo_corpus
 from rag.service import (
+    DEMO_CORPUS_GLOBAL_APPROVAL_REFERENCE,
     DenseRetriever,
     DocumentChunk,
     EmbeddingProviderError,
@@ -20,6 +21,8 @@ from rag.service import (
     SQLAlchemyVectorStore,
 )
 from services.database import RAGDocumentRecord
+
+GLOBAL_APPROVAL = DEMO_CORPUS_GLOBAL_APPROVAL_REFERENCE
 
 
 class FakeSemanticEmbedding:
@@ -41,6 +44,29 @@ def _vector_store(tmp_path):
     RAGDocumentRecord.__table__.create(engine)
     factory = sessionmaker(bind=engine, expire_on_commit=False)
     return engine, factory, SQLAlchemyVectorStore(factory)
+
+
+def _insert_global_fixture(factory, document, approval_reference=GLOBAL_APPROVAL):
+    with factory.begin() as session:
+        session.add(
+            RAGDocumentRecord(
+                document_id=document.document_id,
+                chunk_id=document.chunk_id,
+                text=document.text,
+                document_type=document.source_type,
+                competency_id=document.competency,
+                job_id=document.job_id,
+                organization_id=None,
+                scope="global",
+                scope_approval_reference=approval_reference,
+                difficulty=document.difficulty,
+                source=document.source,
+                version=document.version,
+                active=document.active,
+                language=document.language,
+                tags_json="[]",
+            )
+        )
 
 
 def test_sqlite_database_url_is_respected(monkeypatch, tmp_path):
@@ -109,6 +135,10 @@ def test_provider_configuration_is_explicit_without_credentials(monkeypatch):
 
     monkeypatch.setattr(settings, "EMBEDDING_PROVIDER", "openai")
     monkeypatch.setattr(settings, "OPENAI_API_KEY", "")
+    with pytest.raises(EmbeddingProviderError, match="requires OPENAI_API_KEY"):
+        configured_embedding_provider()
+
+    monkeypatch.setattr(settings, "EMBEDDING_PROVIDER", "none")
     assert configured_embedding_provider() is None
 
     monkeypatch.setattr(settings, "EMBEDDING_PROVIDER", "unknown-provider")
@@ -128,6 +158,8 @@ def test_durable_ingestion_reindex_and_dense_semantic_ranking(tmp_path):
             source_type="technical_knowledge",
             job_id="ai_engineer",
             source="test-corpus",
+            organization_id="org-a",
+            scope="organization",
         ),
         DocumentChunk(
             "database-transaction-knowledge",
@@ -137,11 +169,21 @@ def test_durable_ingestion_reindex_and_dense_semantic_ranking(tmp_path):
             source_type="technical_knowledge",
             job_id="software_engineer",
             source="test-corpus",
+            organization_id="org-a",
+            scope="organization",
         ),
     ]
 
-    assert store.upsert(documents, provider, replace_source=True) == 2
-    assert store.upsert(documents, provider, replace_source=True) == 2
+    assert store.upsert(
+        documents,
+        provider,
+        replace_source=True,
+    ) == 2
+    assert store.upsert(
+        documents,
+        provider,
+        replace_source=True,
+    ) == 2
 
     with factory() as session:
         assert session.query(func.count(RAGDocumentRecord.id)).scalar() == 2
@@ -149,14 +191,22 @@ def test_durable_ingestion_reindex_and_dense_semantic_ranking(tmp_path):
     reopened_store = SQLAlchemyVectorStore(factory)
     results = reopened_store.retrieve(
         "Keep a service available while many external calls are pending",
-        RetrievalFilters(competency="python", job_id="ai_engineer"),
+        RetrievalFilters(
+            competency="python",
+            job_id="ai_engineer",
+            organization_id="org-a",
+        ),
         2,
         provider,
     )
     assert results[0].chunk.document_id == "python-async-knowledge"
     assert results[0].dense_score == 1.0
     assert reopened_store.documents(
-        RetrievalFilters(competency="python", job_id="software_engineer")
+        RetrievalFilters(
+            competency="python",
+            job_id="software_engineer",
+            organization_id="org-a",
+        )
     ) == []
     engine.dispose()
 
@@ -171,6 +221,8 @@ def test_missing_or_stale_semantic_vectors_use_labeled_lexical_results(tmp_path)
             competency="distributed_systems",
             job_id="software_engineer",
             source_type="technical_knowledge",
+            organization_id="org-a",
+            scope="organization",
         )
     ]
     store.upsert(documents, None)
@@ -180,13 +232,20 @@ def test_missing_or_stale_semantic_vectors_use_labeled_lexical_results(tmp_path)
     )
     missing = retriever.retrieve(
         "Redis cache invalidation",
-        RetrievalFilters(competency="distributed_systems", job_id="software_engineer"),
+        RetrievalFilters(
+            competency="distributed_systems",
+            job_id="software_engineer",
+            organization_id="org-a",
+        ),
     )
     assert missing.chunks
     assert missing.dense_count == 0
     assert missing.fallback_reason == "no_matching_semantic_vectors"
 
-    store.upsert(documents, FakeSemanticEmbedding())
+    store.upsert(
+        documents,
+        FakeSemanticEmbedding(),
+    )
 
     class NewEmbeddingVersion(FakeSemanticEmbedding):
         version = "fake-semantic-v2"
@@ -196,7 +255,11 @@ def test_missing_or_stale_semantic_vectors_use_labeled_lexical_results(tmp_path)
         vector_store=store,
     ).retrieve(
         "Redis cache invalidation",
-        RetrievalFilters(competency="distributed_systems", job_id="software_engineer"),
+        RetrievalFilters(
+            competency="distributed_systems",
+            job_id="software_engineer",
+            organization_id="org-a",
+        ),
     )
     assert stale.chunks
     assert stale.dense_count == 0
@@ -205,7 +268,7 @@ def test_missing_or_stale_semantic_vectors_use_labeled_lexical_results(tmp_path)
 
 
 def test_metadata_filters_scope_job_competency_difficulty_and_active(tmp_path):
-    engine, _, store = _vector_store(tmp_path)
+    engine, factory, store = _vector_store(tmp_path)
     docs = [
         DocumentChunk(
             "target",
@@ -217,6 +280,7 @@ def test_metadata_filters_scope_job_competency_difficulty_and_active(tmp_path):
             source_type="evaluation_rubric",
             source="test-corpus",
             organization_id="org-a",
+            scope="organization",
         ),
         DocumentChunk(
             "other-job",
@@ -228,6 +292,7 @@ def test_metadata_filters_scope_job_competency_difficulty_and_active(tmp_path):
             source_type="evaluation_rubric",
             source="test-corpus",
             organization_id="org-a",
+            scope="organization",
         ),
         DocumentChunk(
             "other-organization",
@@ -239,6 +304,7 @@ def test_metadata_filters_scope_job_competency_difficulty_and_active(tmp_path):
             source_type="evaluation_rubric",
             source="test-corpus",
             organization_id="org-b",
+            scope="organization",
         ),
         DocumentChunk(
             "inactive",
@@ -249,6 +315,8 @@ def test_metadata_filters_scope_job_competency_difficulty_and_active(tmp_path):
             difficulty="hard",
             source_type="evaluation_rubric",
             source="test-corpus",
+            scope="global",
+            scope_approval_reference=GLOBAL_APPROVAL,
             active=False,
         ),
         DocumentChunk(
@@ -268,15 +336,23 @@ def test_metadata_filters_scope_job_competency_difficulty_and_active(tmp_path):
             competency="databases",
             source_type="evaluation_rubric",
             source="test-corpus",
+            scope="global",
+            scope_approval_reference=GLOBAL_APPROVAL,
         ),
     ]
-    store.upsert(docs, None)
+    store.upsert(
+        [document for document in docs if document.scope != "global"],
+        None,
+    )
+    for global_document in (document for document in docs if document.scope == "global"):
+        _insert_global_fixture(factory, global_document)
     filtered = store.documents(
         RetrievalFilters(
             competency="databases",
             job_id="software_engineer",
             difficulty="hard",
             source_type="evaluation_rubric",
+            include_global=True,
             organization_id="org-a",
         )
     )
@@ -285,12 +361,322 @@ def test_metadata_filters_scope_job_competency_difficulty_and_active(tmp_path):
         RetrievalFilters(
             competency="databases",
             job_id="software_engineer",
+            include_global=True,
             organization_id="org-b",
         )
     )
     assert {document.document_id for document in org_b} == {"other-organization", "global"}
-    unscoped = store.documents(RetrievalFilters())
+    unscoped = store.documents(RetrievalFilters(include_global=True))
     assert [document.document_id for document in unscoped] == ["global"]
+    engine.dispose()
+
+
+def test_tenant_retrieval_excludes_other_tenants_and_unclassified_legacy_rows(
+    tmp_path,
+):
+    engine, factory, store = _vector_store(tmp_path)
+    tenant_a = DocumentChunk(
+        "shared-document",
+        "shared-chunk",
+        "Organization A private corpus text.",
+        source="shared-source",
+        organization_id="org-a",
+        scope="organization",
+    )
+    tenant_b = DocumentChunk(
+        "shared-document",
+        "shared-chunk",
+        "Organization B private corpus text.",
+        source="shared-source",
+        organization_id="org-b",
+        scope="organization",
+    )
+    unknown = DocumentChunk(
+        "legacy-document",
+        "legacy-chunk",
+        "Unclassified legacy corpus text.",
+        source="legacy-source",
+    )
+    legacy_with_org_hint = DocumentChunk(
+        "legacy-org-hint",
+        "legacy-chunk",
+        "Unclassified record with a stale organization hint.",
+        source="legacy-source",
+        organization_id="org-a",
+    )
+    global_document = DocumentChunk(
+        "shared-document",
+        "shared-chunk",
+        "Approved global corpus text.",
+        source="shared-source",
+        scope="global",
+        scope_approval_reference=GLOBAL_APPROVAL,
+    )
+    store.upsert([tenant_a, tenant_b, unknown], None)
+    _insert_global_fixture(factory, global_document)
+    with factory.begin() as session:
+        session.add(
+            RAGDocumentRecord(
+                document_id=legacy_with_org_hint.document_id,
+                chunk_id=legacy_with_org_hint.chunk_id,
+                text=legacy_with_org_hint.text,
+                document_type=legacy_with_org_hint.source_type,
+                source=legacy_with_org_hint.source,
+                version=legacy_with_org_hint.version,
+                organization_id=legacy_with_org_hint.organization_id,
+                scope="unclassified",
+            )
+        )
+
+    tenant_a_results = store.documents(
+        RetrievalFilters(organization_id="org-a", include_global=True)
+    )
+    assert {
+        (document.organization_id, document.text) for document in tenant_a_results
+    } == {
+        ("org-a", "Organization A private corpus text."),
+        (None, "Approved global corpus text."),
+    }
+    tenant_b_results = store.documents(
+        RetrievalFilters(organization_id="org-b", include_global=True)
+    )
+    assert {
+        (document.organization_id, document.text) for document in tenant_b_results
+    } == {
+        ("org-b", "Organization B private corpus text."),
+        (None, "Approved global corpus text."),
+    }
+    assert [
+        document.document_id
+        for document in store.documents(RetrievalFilters(organization_id="org-a"))
+    ] == ["shared-document"]
+    assert {
+        document.document_id
+        for document in store.documents(
+            RetrievalFilters(organization_id="org-a", include_global=True)
+        )
+    } == {"shared-document"}
+    assert store.documents(RetrievalFilters()) == []
+    with pytest.raises(ValueError, match="cannot be ingested with an organization hint"):
+        store.upsert([legacy_with_org_hint], None)
+
+    with factory() as session:
+        legacy_row = session.query(RAGDocumentRecord).filter_by(
+            document_id="legacy-org-hint"
+        ).one()
+        assert legacy_row.scope == "unclassified"
+        assert legacy_row.organization_id == "org-a"
+    engine.dispose()
+
+
+def test_verified_global_visibility_requires_explicit_policy_and_approval(tmp_path):
+    engine, factory, store = _vector_store(tmp_path)
+    approved_global = DocumentChunk(
+        "global-only",
+        "chunk",
+        "Verified global retrieval content.",
+        source="global-source",
+        scope="global",
+        scope_approval_reference=GLOBAL_APPROVAL,
+    )
+    with pytest.raises(ValueError, match="require an approval reference"):
+        DocumentChunk("unapproved-global", "chunk", "Not approved.", scope="global")
+
+    with pytest.raises(ValueError, match="requires an approval reference"):
+        store.upsert([approved_global], None)
+
+    with pytest.raises(ValueError, match="pinned repository demo corpus"):
+        store.upsert(
+            [approved_global],
+            None,
+            global_approval_reference=GLOBAL_APPROVAL,
+        )
+    _insert_global_fixture(factory, approved_global)
+    _insert_global_fixture(
+        factory,
+        DocumentChunk(
+            "global-untrusted-reference",
+            "chunk",
+            "Global-looking content with an untrusted reference.",
+            source="untrusted-global-source",
+            scope="global",
+            scope_approval_reference="external:unverified",
+        ),
+        approval_reference="external:unverified",
+    )
+    assert store.documents(RetrievalFilters()) == []
+    assert [
+        item.document_id
+        for item in store.documents(RetrievalFilters(include_global=True))
+    ] == ["global-only"]
+    assert store.documents(
+        RetrievalFilters(organization_id="org-a")
+    ) == []
+    assert [
+        item.document_id
+        for item in store.documents(
+            RetrievalFilters(organization_id="org-a", include_global=True)
+        )
+    ] == ["global-only"]
+    engine.dispose()
+
+
+def test_tenant_upsert_identity_isolated_for_same_document_and_source_keys(tmp_path):
+    engine, factory, store = _vector_store(tmp_path)
+    document_a = DocumentChunk(
+        "shared-document",
+        "shared-chunk",
+        "Tenant A original text.",
+        source="shared-source",
+        organization_id="org-a",
+        scope="organization",
+    )
+    document_b = DocumentChunk(
+        "shared-document",
+        "shared-chunk",
+        "Tenant B original text.",
+        source="shared-source",
+        organization_id="org-b",
+        scope="organization",
+    )
+    store.upsert([document_b], None)
+    store.upsert([document_a], None)
+    replacement_a = DocumentChunk(
+        "shared-document",
+        "shared-chunk",
+        "Tenant A replacement text.",
+        source="shared-source",
+        organization_id="org-a",
+        scope="organization",
+    )
+    store.upsert([replacement_a], None)
+
+    a_records = store.documents(RetrievalFilters(organization_id="org-a"))
+    b_records = store.documents(RetrievalFilters(organization_id="org-b"))
+    assert [document.text for document in a_records] == ["Tenant A replacement text."]
+    assert [document.text for document in b_records] == ["Tenant B original text."]
+    with factory() as session:
+        assert session.query(func.count(RAGDocumentRecord.id)).scalar() == 2
+    engine.dispose()
+
+
+def test_replace_source_deactivates_only_the_requesting_organization(tmp_path):
+    engine, _, store = _vector_store(tmp_path)
+    tenant_a = DocumentChunk(
+        "a-old",
+        "chunk",
+        "Tenant A old source content.",
+        source="same-source",
+        organization_id="org-a",
+        scope="organization",
+    )
+    tenant_b = DocumentChunk(
+        "b-old",
+        "chunk",
+        "Tenant B source content.",
+        source="same-source",
+        organization_id="org-b",
+        scope="organization",
+    )
+    store.upsert([tenant_a, tenant_b], None)
+
+    replacement_a = DocumentChunk(
+        "a-new",
+        "chunk",
+        "Tenant A replacement source content.",
+        source="same-source",
+        organization_id="org-a",
+        scope="organization",
+    )
+    store.upsert([replacement_a], None, replace_source=True)
+
+    assert {
+        document.document_id
+        for document in store.documents(RetrievalFilters(organization_id="org-a"))
+    } == {"a-new"}
+    assert {
+        document.document_id
+        for document in store.documents(RetrievalFilters(organization_id="org-b"))
+    } == {"b-old"}
+    engine.dispose()
+
+
+def test_conflicting_replacements_remain_isolated_between_organizations(tmp_path):
+    engine, _, store = _vector_store(tmp_path)
+    tenant_a = DocumentChunk(
+        "shared-document",
+        "shared-chunk",
+        "Tenant A version one.",
+        source="shared-source",
+        organization_id="org-a",
+        scope="organization",
+    )
+    tenant_b = DocumentChunk(
+        "shared-document",
+        "shared-chunk",
+        "Tenant B version one.",
+        source="shared-source",
+        organization_id="org-b",
+        scope="organization",
+    )
+    store.upsert([tenant_a, tenant_b], None)
+
+    store.upsert(
+        [
+            DocumentChunk(
+                "shared-document",
+                "shared-chunk",
+                "Tenant A version two.",
+                source="shared-source",
+                organization_id="org-a",
+                scope="organization",
+            )
+        ],
+        None,
+        replace_source=True,
+    )
+    store.upsert(
+        [
+            DocumentChunk(
+                "shared-document",
+                "shared-chunk",
+                "Tenant B version two.",
+                source="shared-source",
+                organization_id="org-b",
+                scope="organization",
+            )
+        ],
+        None,
+        replace_source=True,
+    )
+
+    assert [
+        document.text
+        for document in store.documents(RetrievalFilters(organization_id="org-a"))
+    ] == ["Tenant A version two."]
+    assert [
+        document.text
+        for document in store.documents(RetrievalFilters(organization_id="org-b"))
+    ] == ["Tenant B version two."]
+    engine.dispose()
+
+
+def test_repeated_tenant_ingestion_is_idempotent(tmp_path):
+    engine, factory, store = _vector_store(tmp_path)
+    document = DocumentChunk(
+        "tenant-document",
+        "chunk",
+        "Tenant A corpus content.",
+        source="tenant-source",
+        organization_id="org-a",
+        scope="organization",
+    )
+
+    store.upsert([document], None)
+    store.upsert([document], None)
+
+    with factory() as session:
+        assert session.query(func.count(RAGDocumentRecord.id)).scalar() == 1
     engine.dispose()
 
 
@@ -321,12 +707,21 @@ def test_provider_failure_keeps_lexical_results_and_labels_reduced_capability():
             raise EmbeddingProviderError("provider unavailable")
 
     documents = [
-        DocumentChunk("redis", "cache", "Redis cache invalidation handles stale values.")
+        DocumentChunk(
+            "redis",
+            "cache",
+            "Redis cache invalidation handles stale values.",
+            scope="global",
+            scope_approval_reference=GLOBAL_APPROVAL,
+        )
     ]
     result = HybridRetriever(
         documents,
         dense=DenseRetriever(BrokenEmbedding()),
-    ).retrieve("Redis cache invalidation")
+    ).retrieve(
+        "Redis cache invalidation",
+        RetrievalFilters(include_global=True),
+    )
 
     assert result.chunks
     assert result.dense_count == 0
@@ -340,10 +735,24 @@ def test_empty_corpus_returns_no_results_and_chunk_ids_are_document_scoped():
     assert empty.fallback_reason == "empty_filtered_corpus"
 
     documents = [
-        DocumentChunk("document-a", "shared-chunk", "Redis cache invalidation."),
-        DocumentChunk("document-b", "shared-chunk", "Redis cache consistency."),
+        DocumentChunk(
+            "document-a",
+            "shared-chunk",
+            "Redis cache invalidation.",
+            scope="global",
+            scope_approval_reference=GLOBAL_APPROVAL,
+        ),
+        DocumentChunk(
+            "document-b",
+            "shared-chunk",
+            "Redis cache consistency.",
+            scope="global",
+            scope_approval_reference=GLOBAL_APPROVAL,
+        ),
     ]
-    result = HybridRetriever(documents).retrieve("Redis cache")
+    result = HybridRetriever(documents).retrieve(
+        "Redis cache", RetrievalFilters(include_global=True)
+    )
     assert len(result.chunks) == 2
 
 
@@ -398,11 +807,33 @@ def test_demo_corpus_is_versioned_and_contains_requested_document_types():
     assert all(doc.document_id and doc.chunk_id and doc.version and doc.source for doc in docs)
 
 
+def test_global_demo_corpus_must_match_the_pinned_digest(tmp_path, monkeypatch):
+    import json
+
+    from rag import corpus_loader
+
+    altered_path = tmp_path / "demo_v1.json"
+    payload = json.loads(corpus_loader.DEMO_CORPUS_PATH.read_text(encoding="utf-8"))
+    payload["documents"][0]["text"] += " altered"
+    altered_path.write_text(json.dumps(payload), encoding="utf-8")
+    monkeypatch.setattr(corpus_loader, "DEMO_CORPUS_PATH", altered_path)
+
+    with pytest.raises(ValueError, match="approved digest"):
+        corpus_loader.load_demo_corpus(altered_path)
+
+
 def test_question_retrieval_reads_persisted_vectors_and_respects_job_scope(tmp_path):
     engine, _, store = _vector_store(tmp_path)
     provider = FakeSemanticEmbedding()
     documents = load_demo_corpus()
-    store.upsert(documents, provider, replace_source=True)
+    store.upsert(
+        documents,
+        provider,
+        replace_source=True,
+        global_approval_reference=(
+            "repository:rag/corpus/demo_v1.json#demo-v1"
+        ),
+    )
     service = RAGQuestionService(
         HybridRetriever(
             dense=DenseRetriever(provider),
