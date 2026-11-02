@@ -15,14 +15,16 @@ from sqlalchemy import func, select
 
 from config import settings
 from services.auth_service import issue_token
-from services.candidate_store import CandidateStore
 from services.database import (
     Base,
+    CandidateRecord,
     InterviewAssessmentRecord,
     InterviewCompetencyStateRecord,
     InterviewEvidenceRecord,
     InterviewQuestionRecord,
     InterviewTurnRecord,
+    OrganizationMembershipRecord,
+    OrganizationRecord,
     SessionLocal,
     engine,
 )
@@ -61,7 +63,13 @@ def _stop_api_process(process: subprocess.Popen[bytes]) -> None:
         process.wait(timeout=5)
 
 
-def _service_worker(interview_id: str, turn_id: str, user_id: str, result_queue) -> None:
+def _service_worker(
+    interview_id: str,
+    turn_id: str,
+    user_id: str,
+    organization_id: str,
+    result_queue,
+) -> None:
     import redis
 
     started = time.monotonic()
@@ -75,6 +83,7 @@ def _service_worker(interview_id: str, turn_id: str, user_id: str, result_queue)
             turn_id,
             user_id,
             "candidate",
+            organization_id,
         )
         result_queue.put({
             "pid": process_id,
@@ -126,17 +135,67 @@ def _assessment_rows(interview_id: str) -> list[tuple[str, str]]:
         ).all())
 
 
+def _tenant_candidate(prefix: str) -> tuple[dict, dict, str]:
+    recruiter = UserStore.create(
+        f"{prefix}-recruiter-{uuid4()}@example.com",
+        "secret123",
+        role="candidate",
+    )
+    user = UserStore.create(
+        f"{prefix}-candidate-{uuid4()}@example.com",
+        "secret123",
+        role="candidate",
+    )
+    organization_id = str(uuid4())
+    candidate_id = str(uuid4())
+    with SessionLocal.begin() as session:
+        session.add(
+            OrganizationRecord(
+                id=organization_id,
+                name=f"Integration organization {prefix}",
+                created_by_user_id=recruiter["id"],
+            )
+        )
+        session.flush()
+        session.add_all(
+            [
+                OrganizationMembershipRecord(
+                    organization_id=organization_id,
+                    user_id=recruiter["id"],
+                    role="recruiter",
+                ),
+                OrganizationMembershipRecord(
+                    organization_id=organization_id,
+                    user_id=user["id"],
+                    role="candidate",
+                ),
+                CandidateRecord(
+                    id=candidate_id,
+                    name="Synthetic Integration Candidate",
+                    email=user["email"],
+                    organization_id=organization_id,
+                    owner_user_id=recruiter["id"],
+                    user_id=user["id"],
+                ),
+            ]
+        )
+    return recruiter, user, organization_id
+
+
 def test_cross_process_interview_service_commits_one_turn_and_replays_idempotently():
     _prepare_database()
-    user = UserStore.create(f"phase115c-{uuid4()}@example.com", "secret123", role="candidate")
-    candidate = CandidateStore.create(
-        {"name": "Concurrency Candidate", "email": user["email"]},
-        user["id"],
-        "candidate",
-    )
+    _recruiter, user, organization_id = _tenant_candidate("phase115c")
+    with SessionLocal() as session:
+        candidate = session.execute(
+            select(CandidateRecord).where(CandidateRecord.user_id == user["id"])
+        ).scalar_one()
     service = InterviewService()
     interview = service.start_interview(
-        candidate["id"], "backend engineer", owner_user_id=user["id"], owner_role="candidate"
+        candidate.id,
+        "backend engineer",
+        owner_user_id=user["id"],
+        owner_role="candidate",
+        organization_id=organization_id,
     )
     interview_id = interview["interview_id"]
     turn_id = f"turn-{uuid4()}"
@@ -144,7 +203,10 @@ def test_cross_process_interview_service_commits_one_turn_and_replays_idempotent
     context = multiprocessing.get_context("spawn")
     result_queue = context.Queue()
     processes = [
-        context.Process(target=_service_worker, args=(interview_id, turn_id, user["id"], result_queue))
+        context.Process(
+            target=_service_worker,
+            args=(interview_id, turn_id, user["id"], organization_id, result_queue),
+        )
         for _ in range(2)
     ]
     started = time.monotonic()
@@ -189,6 +251,7 @@ def test_cross_process_interview_service_commits_one_turn_and_replays_idempotent
         turn_id,
         user["id"],
         "candidate",
+        organization_id,
     )
     assert replay["interview_id"] == interview_id
     assert _query_counts(interview_id)["turns"] == 1
@@ -196,27 +259,44 @@ def test_cross_process_interview_service_commits_one_turn_and_replays_idempotent
     assert _assessment_rows(interview_id) == assessment_rows
 
     next_turn = f"turn-{uuid4()}"
-    service.submit_answer(interview_id, "I used PostgreSQL transactions and unique constraints.", next_turn, user["id"], "candidate")
+    service.submit_answer(
+        interview_id,
+        "I used PostgreSQL transactions and unique constraints.",
+        next_turn,
+        user["id"],
+        "candidate",
+        organization_id,
+    )
     assert _query_counts(interview_id)["turns"] == 2
     print({"interview_id": interview_id, "turn_id": turn_id, "workers": results, "total_seconds": round(elapsed, 3)})
 
 
 def test_interview_service_fails_closed_when_redis_is_unavailable():
     _prepare_database()
-    user = UserStore.create(f"phase115c-down-{uuid4()}@example.com", "secret123", role="candidate")
-    candidate = CandidateStore.create(
-        {"name": "Unavailable Candidate", "email": user["email"]},
-        user["id"],
-        "candidate",
-    )
+    _recruiter, user, organization_id = _tenant_candidate("phase115c-down")
+    with SessionLocal() as session:
+        candidate = session.execute(
+            select(CandidateRecord).where(CandidateRecord.user_id == user["id"])
+        ).scalar_one()
     service = InterviewService()
     interview = service.start_interview(
-        candidate["id"], "backend engineer", owner_user_id=user["id"], owner_role="candidate"
+        candidate.id,
+        "backend engineer",
+        owner_user_id=user["id"],
+        owner_role="candidate",
+        organization_id=organization_id,
     )
     broken = InterviewService(redis_client=__import__("redis").Redis(host="127.0.0.1", port=6399, socket_connect_timeout=0.2))
 
     with pytest.raises(InterviewUnavailableError, match="distributed locking is unavailable"):
-        broken.submit_answer(interview["interview_id"], "answer", f"turn-{uuid4()}", user["id"], "candidate")
+        broken.submit_answer(
+            interview["interview_id"],
+            "answer",
+            f"turn-{uuid4()}",
+            user["id"],
+            "candidate",
+            organization_id,
+        )
 
 
 @pytest.fixture
@@ -265,15 +345,15 @@ def running_api_processes():
 
 
 def test_two_api_processes_coordinate_duplicate_answer(running_api_processes):
-    user = UserStore.create(f"phase115c-api-{uuid4()}@example.com", "secret123", role="candidate")
-    candidate = CandidateStore.create(
-        {"name": "Cross-Process Candidate", "email": user["email"]},
-        user["id"],
-        "candidate",
-    )
+    _recruiter, user, organization_id = _tenant_candidate("phase115c-api")
+    with SessionLocal() as session:
+        candidate = session.execute(
+            select(CandidateRecord).where(CandidateRecord.user_id == user["id"])
+        ).scalar_one()
     token = issue_token(user["email"], user["role"])
     headers = {"Authorization": f"Bearer {token}"}
-    start_payload = {"candidate_id": candidate["id"], "position": "backend engineer", "mode": "text"}
+    headers["X-Organization-ID"] = organization_id
+    start_payload = {"candidate_id": candidate.id, "position": "backend engineer", "mode": "text"}
     start = httpx.post(f"http://127.0.0.1:{running_api_processes[0]}/api/v1/interview/start", json=start_payload, headers=headers, timeout=30)
     assert start.status_code == 200, start.text
     interview_id = start.json()["interview_id"]

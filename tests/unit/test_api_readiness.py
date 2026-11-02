@@ -44,12 +44,6 @@ def test_readiness_disposes_database_and_redis_probes(monkeypatch):
     class DatabaseProbe:
         disposed = False
 
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_args):
-            self.dispose()
-
         def connect(self):
             return DatabaseConnection()
 
@@ -79,3 +73,34 @@ def test_readiness_disposes_database_and_redis_probes(monkeypatch):
     }
     assert database.disposed
     assert redis_client.closed
+
+
+def test_readiness_disposes_database_when_query_fails(monkeypatch):
+    class DatabaseProbe:
+        disposed = False
+
+        def connect(self):
+            raise RuntimeError("database query failed")
+
+        def dispose(self):
+            self.disposed = True
+
+    class RedisProbe:
+        def ping(self):
+            return True
+
+        def close(self):
+            pass
+
+    database = DatabaseProbe()
+    monkeypatch.setattr(sqlalchemy, "create_engine", lambda *_args, **_kwargs: database)
+    monkeypatch.setattr(redis.Redis, "from_url", lambda *_args, **_kwargs: RedisProbe())
+
+    response = asyncio.run(main.health_ready())
+
+    assert response.status_code == 503
+    assert json.loads(response.body) == {
+        "ready": False,
+        "checks": {"database": False, "redis": True},
+    }
+    assert database.disposed

@@ -7,15 +7,16 @@ from datetime import datetime
 
 from fastapi import FastAPI, status
 from fastapi.exceptions import RequestValidationError
-from fastapi.encoders import jsonable_encoder
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
+from starlette.requests import Request
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from config import settings
 from infrastructure.redis_store import RedisClient
 from services.database import init_db
+from services.support_access_audit import audit_platform_support_access
 from services.user_store import UserStore
 from utils import get_logger, setup_logging
 
@@ -88,6 +89,10 @@ app = FastAPI(
     debug=settings.DEBUG,
 )
 
+from apps.api.v1.routes.recruitment_campaigns import router as recruitment_campaigns_router
+
+app.include_router(recruitment_campaigns_router, prefix="/api/v1")
+
 # ==========================================
 # Middleware
 # ==========================================
@@ -104,6 +109,11 @@ app.add_middleware(
 # Gzip compression
 app.add_middleware(GZipMiddleware, minimum_size=1000)
 
+
+@app.middleware("http")
+async def platform_support_audit_middleware(request: Request, call_next):
+    return await audit_platform_support_access(request, call_next)
+
 # ==========================================
 # Exception Handlers
 # ==========================================
@@ -112,13 +122,12 @@ app.add_middleware(GZipMiddleware, minimum_size=1000)
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request, exc):
     """Handle validation errors"""
-    errors = [
-        {key: value for key, value in error.items() if key != "ctx"}
-        for error in exc.errors()
-    ]
     return JSONResponse(
         status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-        content=jsonable_encoder({"detail": errors, "status_code": 422}),
+        content={
+            "detail": exc.errors(),
+            "status_code": 422,
+        },
     )
 
 
@@ -149,15 +158,12 @@ async def health_ready():
     """Readiness probe for required runtime dependencies."""
     ready = True
     checks: dict[str, bool | str] = {"database": True, "redis": True}
+    engine = None
     try:
         from sqlalchemy import create_engine, text
-
         engine = create_engine(settings.DATABASE_URL, pool_pre_ping=True)
-        try:
-            with engine.connect() as conn:
-                conn.execute(text("SELECT 1"))
-        finally:
-            engine.dispose()
+        with engine.connect() as conn:
+            conn.execute(text("SELECT 1"))
     except Exception as exc:
         ready = False
         checks["database"] = False
@@ -165,6 +171,17 @@ async def health_ready():
             "Database readiness check failed",
             extra={"failure_type": type(exc).__name__},
         )
+    finally:
+        if engine is not None:
+            try:
+                engine.dispose()
+            except Exception as exc:
+                ready = False
+                checks["database"] = False
+                logger.warning(
+                    "Database readiness client cleanup failed",
+                    extra={"failure_type": type(exc).__name__},
+                )
 
     client = None
     try:
@@ -220,12 +237,14 @@ from apps.api.v1.routes.account_linking import router as account_linking_router
 from apps.api.v1.routes.auth import router as auth_router
 from apps.api.v1.routes.candidate import router as candidate_router
 from apps.api.v1.routes.interview import router as interview_router
+from apps.api.v1.routes.organizations import router as organizations_router
 from apps.api.websocket.interview import router as websocket_router
 
 app.include_router(auth_router, prefix=settings.API_PREFIX)
 app.include_router(account_linking_router, prefix=settings.API_PREFIX)
 app.include_router(candidate_router, prefix=settings.API_PREFIX)
 app.include_router(interview_router, prefix=settings.API_PREFIX)
+app.include_router(organizations_router, prefix=settings.API_PREFIX)
 app.include_router(websocket_router)
 
 app.mount("/web", StaticFiles(directory="apps/web/src"), name="web")

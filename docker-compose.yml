@@ -68,29 +68,30 @@ services:
       retries: 3
 
   # ==========================================
-  # Celery Worker - Background Jobs
+  # Recruitment Campaign Database Worker
   # ==========================================
-  celery_worker:
+  recruitment_campaign_worker:
     build:
       context: .
       dockerfile: docker/Dockerfile.worker
     container_name: ai_interviewer_worker
-    command: celery -A apps.worker.celery_app worker --loglevel=info
+    command: python -m services.recruitment_campaign_worker run
     environment:
       DATABASE_URL: postgresql://ai_interviewer:ai_interviewer_dev@postgres:5432/ai_interviewer
-      REDIS_URL: redis://redis:6379/0
-      CELERY_BROKER_URL: redis://redis:6379/1
-      CELERY_RESULT_BACKEND: redis://redis:6379/2
     volumes:
       - .:/app
       - /app/__pycache__
     depends_on:
       - postgres
-      - redis
-      - api
+    healthcheck:
+      test: ["CMD", "python", "-m", "services.recruitment_campaign_worker", "status"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
 
   # ==========================================
-  # Celery Flower - Task Monitoring
+  # Legacy Celery monitoring (not used by recruitment campaign dispatch)
   # ==========================================
   flower:
     image: mher/flower:2.0
@@ -103,7 +104,9 @@ services:
       CELERY_RESULT_BACKEND: redis://redis:6379/2
     depends_on:
       - redis
-      - celery_worker
+      - recruitment_campaign_worker
+    profiles:
+      - legacy-celery
 
   # ==========================================
   # React Frontend (Optional)

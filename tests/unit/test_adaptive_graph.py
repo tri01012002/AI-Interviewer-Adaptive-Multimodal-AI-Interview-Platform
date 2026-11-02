@@ -221,6 +221,7 @@ def test_question_provider_failure_uses_unique_deterministic_fallback():
     )
 
     assert result["current_question"]
+    assert result["question_source"] == "deterministic_fallback"
     assert any("question generation fallback" in error for error in result["errors"])
 
 

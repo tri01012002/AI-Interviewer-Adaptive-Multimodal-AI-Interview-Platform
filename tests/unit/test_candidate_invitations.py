@@ -10,15 +10,24 @@ from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 
 from apps.api.main import app
-from services.auth_service import issue_token
 from services.database import (
     AccessAuditRecord,
     CandidateInvitationRecord,
     CandidateRecord,
+    OrganizationMembershipRecord,
     SessionLocal,
     UserRecord,
 )
-from services.user_store import UserStore
+from tests.unit.tenant_test_utils import (
+    create_candidate_through_invitation,
+    create_tenant,
+    create_user,
+    issue_candidate_invitation,
+    mark_email_verified,
+    redeem_invitation,
+    start_interview,
+    tenant_headers,
+)
 
 
 @pytest.fixture
@@ -27,414 +36,308 @@ def client():
         yield test_client
 
 
-def create_user(role: str, email: str | None = None) -> tuple[dict, dict[str, str]]:
-    email = email or f"{role}-{uuid4()}@example.com"
-    user = UserStore.create(email, "secret123", role=role)
-    token = issue_token(email, role)
-    return user, {"Authorization": f"Bearer {token}"}
-
-
-def create_candidate(client: TestClient, headers: dict[str, str], email: str) -> dict:
-    response = client.post(
-        "/api/v1/candidates",
-        json={"name": "Invitation Candidate", "email": email},
-        headers=headers,
-    )
-    assert response.status_code == 200, response.text
-    return response.json()
-
-
-def verify_email(client: TestClient, admin_headers: dict[str, str], user_id: str):
-    return client.post(
-        f"/api/v1/admin/users/{user_id}/verify-email",
-        json={"confirmation": "confirmed_out_of_band"},
-        headers=admin_headers,
-    )
-
-
-def create_invitation(
-    client: TestClient, recruiter_headers: dict[str, str], candidate_id: str
-):
-    return client.post(
-        f"/api/v1/candidates/{candidate_id}/invitations",
-        headers=recruiter_headers,
-    )
-
-
-def test_verified_candidate_links_profile_and_keeps_authorization(
+def test_invite_first_redemption_creates_private_profile_and_is_single_use(
     client: TestClient,
 ):
-    recruiter, recruiter_headers = create_user("recruiter")
-    candidate_user, candidate_headers = create_user("candidate")
-    other_recruiter, other_recruiter_headers = create_user("recruiter")
-    admin, admin_headers = create_user("admin")
-    profile = create_candidate(client, recruiter_headers, candidate_user["email"])
-    outsider_profile = create_candidate(
-        client, other_recruiter_headers, f"outsider-{uuid4()}@example.com"
+    tenant = create_tenant(client)
+    candidate, candidate_headers, invitation = issue_candidate_invitation(
+        client, tenant
     )
-    outsider_interview = client.post(
-        "/api/v1/interview/start",
-        json={
-            "candidate_id": outsider_profile["id"],
-            "position": "Synthetic Engineer",
-        },
-        headers=other_recruiter_headers,
-    )
-    assert outsider_interview.status_code == 200, outsider_interview.text
-
-    assert verify_email(client, admin_headers, candidate_user["id"]).status_code == 200
-    assert create_invitation(
-        client, other_recruiter_headers, profile["id"]
-    ).status_code == 404
-    invitation_response = create_invitation(
-        client, recruiter_headers, profile["id"]
-    )
-    assert invitation_response.status_code == 201, invitation_response.text
-    invitation = invitation_response.json()
-    token = invitation["token"]
-
     with SessionLocal() as session:
         stored = session.get(CandidateInvitationRecord, invitation["invitation_id"])
         assert stored is not None
-        assert stored.token_hash == sha256(token.encode()).hexdigest()
-        assert token != stored.token_hash
-        assert stored.email == candidate_user["email"].lower()
-        assert recruiter["id"] == stored.recruiter_user_id
+        assert stored.candidate_id is None
+        assert stored.organization_id == tenant.organization_id
+        assert stored.token_hash == sha256(invitation["token"].encode()).hexdigest()
+        assert invitation["token"] != stored.token_hash
+        assert stored.email == candidate["email"]
 
-    interview = client.post(
-        "/api/v1/interview/start",
-        json={"candidate_id": profile["id"], "position": "Synthetic Engineer"},
-        headers=recruiter_headers,
-    )
-    assert interview.status_code == 200, interview.text
-    interview_id = interview.json()["interview_id"]
-
-    redemption = client.post(
-        "/api/v1/candidate-invitations/redeem",
-        json={"token": token},
-        headers=candidate_headers,
-    )
-    assert redemption.status_code == 200, redemption.text
-    assert redemption.json() == {"candidate_id": profile["id"]}
-
-    assert client.get(
-        f"/api/v1/candidates/{profile['id']}", headers=candidate_headers
-    ).status_code == 200
-    assert client.get(
-        f"/api/v1/interview/{interview_id}", headers=candidate_headers
-    ).status_code == 200
-    assert client.get(
-        f"/api/v1/candidates/{outsider_profile['id']}", headers=candidate_headers
-    ).status_code == 404
-    assert client.get(
-        f"/api/v1/interview/{outsider_interview.json()['interview_id']}",
-        headers=candidate_headers,
-    ).status_code == 404
-
-    answer = {"turn_id": f"linked-{uuid4()}", "answer": "I delivered a Python API."}
-    first = client.post(
-        f"/api/v1/interview/{interview_id}/answer",
-        json=answer,
-        headers=candidate_headers,
-    )
-    replay = client.post(
-        f"/api/v1/interview/{interview_id}/answer",
-        json=answer,
-        headers=candidate_headers,
-    )
-    assert first.status_code == 200, first.text
-    assert replay.status_code == 200, replay.text
-    assert replay.json() == first.json()
-    assert client.post(
-        f"/api/v1/interview/{interview_id}/report", headers=candidate_headers
-    ).status_code == 200
-    assert client.get(
-        f"/api/v1/interview/{interview_id}",
-        headers=other_recruiter_headers,
-    ).status_code == 404
-    assert client.post(
-        f"/api/v1/interview/{interview_id}/report",
-        headers=other_recruiter_headers,
-    ).status_code == 404
-
-    candidate_token = candidate_headers["Authorization"].removeprefix("Bearer ")
-    with client.websocket_connect(
-        f"/ws/interview/{interview_id}?token={candidate_token}"
-    ) as websocket:
-        assert websocket.receive_json()["type"] == "connected"
-
+    redeemed = redeem_invitation(client, tenant, candidate_headers, invitation)
+    assert redeemed.status_code == 200, redeemed.text
+    candidate_id = redeemed.json()["candidate_id"]
     with SessionLocal() as session:
-        actions = set(
-            session.execute(
-                select(AccessAuditRecord.action, AccessAuditRecord.resource_type)
-                .where(
-                    AccessAuditRecord.actor_user_id.in_(
-                        [admin["id"], candidate_user["id"]]
-                    )
-                )
-            ).all()
-        )
-    assert ("verify_email_out_of_band", "user") in actions
-    assert ("link", "candidate") in actions
-
-    reused = client.post(
-        "/api/v1/candidate-invitations/redeem",
-        json={"token": token},
-        headers=candidate_headers,
-    )
-    assert reused.status_code == 400
-    assert invitation["token"] not in str(stored.token_hash)
-
-
-def test_invitation_requires_owned_profile_and_verified_account(
-    client: TestClient,
-):
-    recruiter, recruiter_headers = create_user("recruiter")
-    _, other_headers = create_user("recruiter")
-    candidate_user, _ = create_user("candidate")
-    admin, admin_headers = create_user("admin")
-    profile = create_candidate(client, recruiter_headers, candidate_user["email"])
-
-    assert create_invitation(client, other_headers, profile["id"]).status_code == 404
-    not_verified = create_invitation(client, recruiter_headers, profile["id"])
-    assert not_verified.status_code == 409
-
-    denied_verification = verify_email(
-        client,
-        other_headers,
-        candidate_user["id"],
-    )
-    assert denied_verification.status_code == 403
-    assert verify_email(client, admin_headers, candidate_user["id"]).status_code == 200
-    assert create_invitation(
-        client, recruiter_headers, profile["id"]
-    ).status_code == 201
-
-    with SessionLocal() as session:
-        verification_audit = session.execute(
-            select(AccessAuditRecord).where(
-                AccessAuditRecord.actor_user_id == admin["id"],
-                AccessAuditRecord.action == "verify_email_out_of_band",
-                AccessAuditRecord.resource_id == candidate_user["id"],
+        profile = session.get(CandidateRecord, candidate_id)
+        membership = session.execute(
+            select(OrganizationMembershipRecord).where(
+                OrganizationMembershipRecord.organization_id == tenant.organization_id,
+                OrganizationMembershipRecord.user_id == candidate["id"],
             )
         ).scalar_one()
-    assert verification_audit.resource_type == "user"
-    assert recruiter["id"] != admin["id"]
+        stored = session.get(CandidateInvitationRecord, invitation["invitation_id"])
+        assert profile is not None
+        assert profile.organization_id == tenant.organization_id
+        assert profile.owner_user_id == tenant.recruiter["id"]
+        assert profile.user_id == candidate["id"]
+        assert membership.role == "candidate"
+        assert membership.status == "active"
+        assert stored is not None
+        assert stored.consumed_at is not None
 
-
-def test_public_signup_cannot_assign_privileged_role(client: TestClient):
-    email = f"public-role-{uuid4()}@example.com"
-    response = client.post(
-        "/api/v1/auth/register",
-        json={"email": email, "password": "secret123", "role": "admin"},
+    interview = start_interview(client, tenant, candidate_id)
+    candidate_scoped = tenant_headers(candidate_headers, tenant.organization_id)
+    assert client.get(
+        f"/api/v1/candidates/{candidate_id}", headers=candidate_scoped
+    ).status_code == 200
+    assert client.get(
+        f"/api/v1/interview/{interview['interview_id']}",
+        headers=candidate_scoped,
+    ).status_code == 200
+    answer = {"turn_id": f"linked-{uuid4()}", "answer": "I delivered a Python API."}
+    first = client.post(
+        f"/api/v1/interview/{interview['interview_id']}/answer",
+        json=answer,
+        headers=candidate_scoped,
     )
-    assert response.status_code == 200
-    user = UserStore.get_by_email(email)
-    assert user is not None
-    assert user["role"] == "candidate"
+    replay = client.post(
+        f"/api/v1/interview/{interview['interview_id']}/answer",
+        json=answer,
+        headers=candidate_scoped,
+    )
+    assert first.status_code == 200, first.text
+    assert replay.status_code == 200
+    assert replay.json() == first.json()
+    assert client.post(
+        f"/api/v1/interview/{interview['interview_id']}/report",
+        headers=candidate_scoped,
+    ).status_code == 200
+
+    reused = redeem_invitation(client, tenant, candidate_headers, invitation)
+    assert reused.status_code == 400
+    assert reused.json()["detail"] == "Invitation is invalid or unavailable"
     with SessionLocal() as session:
-        record = session.execute(
-            select(UserRecord).where(UserRecord.email == email)
+        audit = session.execute(
+            select(AccessAuditRecord).where(
+                AccessAuditRecord.actor_user_id == candidate["id"],
+                AccessAuditRecord.action == "redeem",
+                AccessAuditRecord.resource_id == candidate_id,
+            )
         ).scalar_one()
-        assert record.email_verified_at is None
+    assert audit.organization_id == tenant.organization_id
 
 
-@pytest.mark.parametrize("invalid_token", ["x", token_urlsafe(32)])
-def test_malformed_and_unknown_tokens_have_safe_response(
-    client: TestClient, invalid_token: str
-):
-    _, headers = create_user("candidate")
+def test_candidate_profile_endpoint_rejects_direct_creation(client: TestClient):
+    tenant = create_tenant(client)
+    _, candidate_headers = create_user("candidate")
     response = client.post(
-        "/api/v1/candidate-invitations/redeem",
-        json={"token": invalid_token},
-        headers=headers,
+        "/api/v1/candidates",
+        json={"name": "Direct profile", "email": "direct@example.com"},
+        headers=tenant_headers(tenant.recruiter_headers, tenant.organization_id),
     )
-    assert response.status_code == 400
-    assert response.json()["detail"] == "Invitation is invalid or unavailable"
+    assert response.status_code == 409
+    assert "invitation redemption" in response.json()["detail"]
+    assert client.get(
+        "/api/v1/candidates",
+        headers=tenant_headers(candidate_headers, tenant.organization_id),
+    ).status_code == 404
 
 
-def test_email_mismatch_unverified_and_expired_invitations_are_rejected(
+def test_legacy_candidate_id_invitation_requires_mapped_owned_profile(
     client: TestClient,
 ):
-    recruiter, recruiter_headers = create_user("recruiter")
-    target_user, target_headers = create_user("candidate")
-    other_user, other_headers = create_user("candidate")
-    admin, admin_headers = create_user("admin")
-    profile = create_candidate(client, recruiter_headers, target_user["email"])
-    assert verify_email(client, admin_headers, target_user["id"]).status_code == 200
-    assert verify_email(client, admin_headers, other_user["id"]).status_code == 200
+    tenant = create_tenant(client)
+    target, candidate_headers = create_user("candidate")
+    mark_email_verified(target["id"])
+    candidate_id = f"mapped-{uuid4()}"
+    with SessionLocal.begin() as session:
+        session.add(
+            CandidateRecord(
+                id=candidate_id,
+                organization_id=tenant.organization_id,
+                name="Mapped Candidate",
+                email=target["email"],
+                owner_user_id=tenant.recruiter["id"],
+            )
+        )
 
-    invitation = create_invitation(client, recruiter_headers, profile["id"]).json()
-    mismatch = client.post(
-        "/api/v1/candidate-invitations/redeem",
-        json={"token": invitation["token"]},
-        headers=other_headers,
+    response = client.post(
+        f"/api/v1/candidates/{candidate_id}/invitations",
+        headers=tenant_headers(tenant.recruiter_headers, tenant.organization_id),
     )
+    assert response.status_code == 201, response.text
+    redeemed = redeem_invitation(
+        client, tenant, candidate_headers, response.json()
+    )
+    assert redeemed.status_code == 200
+    assert redeemed.json() == {"candidate_id": candidate_id}
+
+    unassigned_id = f"unassigned-{uuid4()}"
+    with SessionLocal.begin() as session:
+        session.add(
+            CandidateRecord(
+                id=unassigned_id,
+                organization_id=None,
+                name="Unassigned legacy candidate",
+                email=f"legacy-{uuid4()}@example.com",
+                owner_user_id=None,
+            )
+        )
+    unassigned = client.post(
+        f"/api/v1/candidates/{unassigned_id}/invitations",
+        headers=tenant_headers(tenant.recruiter_headers, tenant.organization_id),
+    )
+    assert unassigned.status_code == 404
+
+
+def test_cross_account_mismatch_and_expired_invitation_are_rejected(
+    client: TestClient,
+):
+    tenant = create_tenant(client)
+    target, target_headers, invitation = issue_candidate_invitation(client, tenant)
+    other, other_headers = create_user("candidate")
+    mark_email_verified(other["id"])
+
+    mismatch = redeem_invitation(client, tenant, other_headers, invitation)
     assert mismatch.status_code == 400
     assert mismatch.json()["detail"] == "Invitation is invalid or unavailable"
-
-    with SessionLocal.begin() as session:
-        session.execute(
-            update(UserRecord)
-            .where(UserRecord.id == target_user["id"])
-            .values(email_verified_at=None)
-        )
-    unverified = client.post(
-        "/api/v1/candidate-invitations/redeem",
-        json={"token": invitation["token"]},
-        headers=target_headers,
+    unverified, unverified_headers = create_user("candidate")
+    another = client.post(
+        "/api/v1/candidate-invitations",
+        json={"candidate_name": "Unverified Candidate", "email": unverified["email"]},
+        headers=tenant_headers(tenant.recruiter_headers, tenant.organization_id),
     )
-    assert unverified.status_code == 400
+    assert another.status_code == 201
+    unverified_result = redeem_invitation(
+        client, tenant, unverified_headers, another.json()
+    )
+    assert unverified_result.status_code == 400
 
+    mark_email_verified(target["id"])
     with SessionLocal.begin() as session:
-        session.execute(
-            update(UserRecord)
-            .where(UserRecord.id == target_user["id"])
-            .values(email_verified_at=datetime.now(UTC))
-        )
         session.execute(
             update(CandidateInvitationRecord)
             .where(CandidateInvitationRecord.id == invitation["invitation_id"])
             .values(expires_at=datetime.now(UTC) - timedelta(seconds=1))
         )
-    expired = client.post(
-        "/api/v1/candidate-invitations/redeem",
-        json={"token": invitation["token"]},
-        headers=target_headers,
-    )
+    expired = redeem_invitation(client, tenant, target_headers, invitation)
     assert expired.status_code == 400
-    assert recruiter["id"] != admin["id"]
 
 
-def test_revoked_invitation_cannot_be_redeemed(client: TestClient):
-    _, recruiter_headers = create_user("recruiter")
-    candidate_user, candidate_headers = create_user("candidate")
-    admin, admin_headers = create_user("admin")
-    profile = create_candidate(client, recruiter_headers, candidate_user["email"])
-    assert verify_email(client, admin_headers, candidate_user["id"]).status_code == 200
-    invitation = create_invitation(client, recruiter_headers, profile["id"]).json()
+def test_invitation_revocation_and_recruiter_revocation_prevent_redemption(
+    client: TestClient,
+):
+    tenant = create_tenant(client)
+    candidate, candidate_headers, invitation = issue_candidate_invitation(
+        client, tenant
+    )
     revoked = client.delete(
-        f"/api/v1/candidates/{profile['id']}/invitations",
-        headers=recruiter_headers,
+        f"/api/v1/candidate-invitations/{invitation['invitation_id']}",
+        headers=tenant_headers(tenant.recruiter_headers, tenant.organization_id),
     )
-    assert revoked.status_code == 200, revoked.text
-
-    redemption = client.post(
-        "/api/v1/candidate-invitations/redeem",
-        json={"token": invitation["token"]},
-        headers=candidate_headers,
-    )
+    assert revoked.status_code == 200
+    redemption = redeem_invitation(client, tenant, candidate_headers, invitation)
     assert redemption.status_code == 400
-    with SessionLocal() as session:
-        audit = session.execute(
-            select(AccessAuditRecord).where(
-                AccessAuditRecord.actor_user_id == admin["id"],
-                AccessAuditRecord.action == "verify_email_out_of_band",
+
+    candidate_2, candidate_headers_2, invitation_2 = issue_candidate_invitation(
+        client, tenant
+    )
+    membership_id = client.get(
+        "/api/v1/organizations/mine", headers=tenant.recruiter_headers
+    ).json()[0]["id"]
+    with SessionLocal.begin() as session:
+        recruiter_membership = session.execute(
+            select(OrganizationMembershipRecord).where(
+                OrganizationMembershipRecord.organization_id == membership_id,
+                OrganizationMembershipRecord.user_id == tenant.recruiter["id"],
             )
         ).scalar_one()
-        stored = session.get(
-            CandidateInvitationRecord, invitation["invitation_id"]
-        )
-        assert audit.resource_id == candidate_user["id"]
-        assert stored is not None
-        assert stored.revoked_at is not None
-
-
-def test_two_candidate_accounts_cannot_claim_one_profile(client: TestClient):
-    _, recruiter_headers = create_user("recruiter")
-    intended_user, intended_headers = create_user("candidate")
-    other_user, other_headers = create_user("candidate")
-    _, admin_headers = create_user("admin")
-    profile = create_candidate(client, recruiter_headers, intended_user["email"])
-    assert verify_email(client, admin_headers, intended_user["id"]).status_code == 200
-    assert verify_email(client, admin_headers, other_user["id"]).status_code == 200
-    invitation = create_invitation(client, recruiter_headers, profile["id"]).json()
-
-    wrong_user = client.post(
-        "/api/v1/candidate-invitations/redeem",
-        json={"token": invitation["token"]},
-        headers=other_headers,
+    response = client.delete(
+        f"/api/v1/organization/recruiters/{recruiter_membership.id}",
+        headers=tenant_headers(tenant.org_admin_headers, tenant.organization_id),
     )
-    assert wrong_user.status_code == 400
-    claimed = client.post(
-        "/api/v1/candidate-invitations/redeem",
-        json={"token": invitation["token"]},
-        headers=intended_headers,
+    assert response.status_code == 200
+    assert redeem_invitation(
+        client, tenant, candidate_headers_2, invitation_2
+    ).status_code == 400
+    assert candidate["id"] != candidate_2["id"]
+
+
+def test_token_cannot_be_claimed_by_another_account(client: TestClient):
+    tenant = create_tenant(client)
+    intended, intended_headers, invitation = issue_candidate_invitation(
+        client, tenant
     )
+    other, other_headers = create_user("candidate")
+    mark_email_verified(other["id"])
+    assert redeem_invitation(client, tenant, other_headers, invitation).status_code == 400
+    claimed = redeem_invitation(client, tenant, intended_headers, invitation)
     assert claimed.status_code == 200
-    assert intended_user["id"] != other_user["id"]
+    assert intended["id"] != other["id"]
 
 
 def test_simultaneous_redemption_links_exactly_once(client: TestClient):
-    _, recruiter_headers = create_user("recruiter")
-    candidate_user, candidate_headers = create_user("candidate")
-    _, admin_headers = create_user("admin")
-    profile = create_candidate(client, recruiter_headers, candidate_user["email"])
-    assert verify_email(client, admin_headers, candidate_user["id"]).status_code == 200
-    invitation = create_invitation(client, recruiter_headers, profile["id"]).json()
+    tenant = create_tenant(client)
+    candidate, candidate_headers, invitation = issue_candidate_invitation(
+        client, tenant
+    )
 
     def redeem():
-        return client.post(
-            "/api/v1/candidate-invitations/redeem",
-            json={"token": invitation["token"]},
-            headers=candidate_headers,
-        )
+        return redeem_invitation(client, tenant, candidate_headers, invitation)
 
     with ThreadPoolExecutor(max_workers=2) as executor:
         responses = list(executor.map(lambda _: redeem(), range(2)))
     assert sorted(response.status_code for response in responses) == [200, 400]
+    profile_id = next(
+        response.json()["candidate_id"]
+        for response in responses
+        if response.status_code == 200
+    )
     with SessionLocal() as session:
-        linked = session.get(CandidateRecord, profile["id"])
-        stored = session.get(
-            CandidateInvitationRecord, invitation["invitation_id"]
-        )
-        assert linked is not None
-        assert linked.user_id == candidate_user["id"]
+        profile = session.get(CandidateRecord, profile_id)
+        stored = session.get(CandidateInvitationRecord, invitation["invitation_id"])
+        assert profile is not None
+        assert profile.user_id == candidate["id"]
         assert stored is not None
         assert stored.consumed_at is not None
 
 
-def test_candidate_account_link_uniqueness_blocks_second_profile():
-    first_user, _ = create_user("candidate")
-    recruiter, _ = create_user("recruiter")
-    first_profile = CandidateRecord(
-        name="First",
-        email=f"first-{uuid4()}@example.com",
-        owner_user_id=recruiter["id"],
-        user_id=first_user["id"],
-    )
-    second_profile = CandidateRecord(
-        name="Second",
-        email=f"second-{uuid4()}@example.com",
-        owner_user_id=recruiter["id"],
-    )
-    with SessionLocal.begin() as session:
-        session.add_all([first_profile, second_profile])
-    with pytest.raises(IntegrityError), SessionLocal.begin() as session:
-        session.execute(
-            update(CandidateRecord)
-            .where(CandidateRecord.id == second_profile.id)
-            .values(user_id=first_user["id"])
-        )
-    with SessionLocal() as session:
-        assert session.get(CandidateRecord, second_profile.id).user_id is None
-
-
-def test_invitation_creation_and_redemption_are_rate_limited(
+def test_one_global_candidate_identity_has_private_profiles_per_organization(
     client: TestClient,
 ):
-    _, recruiter_headers = create_user("recruiter")
-    candidate_user, candidate_headers = create_user("candidate")
-    _, admin_headers = create_user("admin")
-    profile = create_candidate(client, recruiter_headers, candidate_user["email"])
-    assert verify_email(client, admin_headers, candidate_user["id"]).status_code == 200
-
-    created = create_invitation(client, recruiter_headers, profile["id"])
-    assert created.status_code == 201, created.text
-    limited_creation = create_invitation(
-        client, recruiter_headers, profile["id"]
+    tenant_a = create_tenant(client, "Candidate Tenant A")
+    tenant_b = create_tenant(client, "Candidate Tenant B")
+    candidate, candidate_headers, profile_a, _ = create_candidate_through_invitation(
+        client, tenant_a
     )
-    assert limited_creation.status_code == 429
+    response = client.post(
+        "/api/v1/candidate-invitations",
+        json={"candidate_name": "Private Profile B", "email": candidate["email"]},
+        headers=tenant_headers(tenant_b.recruiter_headers, tenant_b.organization_id),
+    )
+    assert response.status_code == 201, response.text
+    implicit = client.post(
+        "/api/v1/candidate-invitations/redeem",
+        json={"token": response.json()["token"]},
+        headers=candidate_headers,
+    )
+    assert implicit.status_code == 400
+    explicit = client.post(
+        "/api/v1/candidate-invitations/redeem",
+        json={"token": response.json()["token"]},
+        headers=tenant_headers(candidate_headers, tenant_b.organization_id),
+    )
+    assert explicit.status_code == 200
+    profile_b = explicit.json()["candidate_id"]
+    assert profile_b != profile_a["candidate_id"]
+    assert client.get(
+        f"/api/v1/candidates/{profile_a['candidate_id']}",
+        headers=tenant_headers(candidate_headers, tenant_a.organization_id),
+    ).status_code == 200
+    assert client.get(
+        f"/api/v1/candidates/{profile_b}",
+        headers=tenant_headers(candidate_headers, tenant_b.organization_id),
+    ).status_code == 200
+
+
+def test_invitation_and_redemption_rate_limits_remain_active(client: TestClient):
+    tenant = create_tenant(client)
+    candidate, _, invitation = issue_candidate_invitation(client, tenant)
+    duplicate = client.post(
+        "/api/v1/candidate-invitations",
+        json={"candidate_name": "Repeated", "email": candidate["email"]},
+        headers=tenant_headers(tenant.recruiter_headers, tenant.organization_id),
+    )
+    assert duplicate.status_code == 429
+    assert invitation["invitation_id"]
 
     _, unverified_headers = create_user("candidate")
     for _ in range(20):
@@ -444,9 +347,24 @@ def test_invitation_creation_and_redemption_are_rate_limited(
             headers=unverified_headers,
         )
         assert response.status_code == 400
-    limited_redemption = client.post(
+    limited = client.post(
         "/api/v1/candidate-invitations/redeem",
         json={"token": token_urlsafe(32)},
         headers=unverified_headers,
     )
-    assert limited_redemption.status_code == 429
+    assert limited.status_code == 429
+
+
+def test_public_signup_cannot_assign_privileged_role(client: TestClient):
+    email = f"public-role-{uuid4()}@example.com"
+    response = client.post(
+        "/api/v1/auth/register",
+        json={"email": email, "password": "secret123", "role": "admin"},
+    )
+    assert response.status_code == 200
+    with SessionLocal() as session:
+        user = session.execute(
+            select(UserRecord).where(UserRecord.email == email)
+        ).scalar_one()
+        assert user.role == "candidate"
+        assert user.email_verified_at is None

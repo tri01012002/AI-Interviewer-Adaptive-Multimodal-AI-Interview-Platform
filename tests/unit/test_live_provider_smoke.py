@@ -199,9 +199,10 @@ def test_live_embedding_is_persisted_and_retrieves_demo_corpus(tmp_path, monkeyp
             return vector
 
     counting_provider = CountingEmbeddingProvider(provider)
+    documents = load_demo_corpus()
     document = next(
         chunk
-        for chunk in load_demo_corpus()
+        for chunk in documents
         if chunk.document_id == "python-async-io-knowledge"
     )
     engine = create_engine(f"sqlite:///{tmp_path / 'live-embedding-smoke.db'}")
@@ -210,13 +211,20 @@ def test_live_embedding_is_persisted_and_retrieves_demo_corpus(tmp_path, monkeyp
     store = SQLAlchemyVectorStore(factory)
 
     started = perf_counter()
-    assert store.upsert([document], counting_provider) == 1
+    assert store.upsert(
+        documents,
+        counting_provider,
+        global_approval_reference=(
+            "repository:rag/corpus/demo_v1.json#demo-v1"
+        ),
+    ) == len(documents)
     stored_at = perf_counter()
     results = store.retrieve(
         "Keep simultaneous web requests responsive without overloading dependent services.",
         filters=RetrievalFilters(
             competency="python",
             job_id="ai_engineer",
+            include_global=True,
         ),
         top_k=3,
         embedding_provider=counting_provider,
@@ -226,7 +234,11 @@ def test_live_embedding_is_persisted_and_retrieves_demo_corpus(tmp_path, monkeyp
     fresh_store = SQLAlchemyVectorStore(factory)
     fresh_results = fresh_store.retrieve(
         "Keep simultaneous web requests responsive without overloading dependent services.",
-        filters=RetrievalFilters(competency="python", job_id="ai_engineer"),
+        filters=RetrievalFilters(
+            competency="python",
+            job_id="ai_engineer",
+            include_global=True,
+        ),
         top_k=3,
         embedding_provider=counting_provider,
     )
@@ -253,7 +265,7 @@ def test_live_embedding_is_persisted_and_retrieves_demo_corpus(tmp_path, monkeyp
     assert fresh_results[0].chunk.document_id == document.document_id
     assert fresh_results[0].dense_score > 0
     assert not unscoped_results
-    assert counting_provider.call_count == 3
+    assert counting_provider.call_count == len(documents) + 2
     logger.info(
         "live embedding smoke result",
         extra={

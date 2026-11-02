@@ -1,65 +1,61 @@
+from uuid import uuid4
+
 import pytest
 from fastapi.testclient import TestClient
 
 from apps.api.main import app
-from services.user_store import UserStore
-
-TEST_ADMIN_EMAIL = "pipeline-test-admin@example.test"
-TEST_ADMIN_PASSWORD = "test-only-pipeline-password"
+from tests.unit.tenant_test_utils import (
+    create_candidate_through_invitation,
+    create_tenant,
+    start_interview,
+    tenant_headers,
+)
 
 
 @pytest.fixture
 def client():
     with TestClient(app) as test_client:
-        UserStore.create(TEST_ADMIN_EMAIL, TEST_ADMIN_PASSWORD, role="admin")
         yield test_client
 
 
-def test_auth_and_candidate_flow(client: TestClient):
-    login = client.post(
-        "/api/v1/auth/login",
-        json={"email": TEST_ADMIN_EMAIL, "password": TEST_ADMIN_PASSWORD},
+def test_auth_and_candidate_invitation_flow(client: TestClient):
+    tenant = create_tenant(client)
+    candidate, candidate_headers, profile, _invitation = (
+        create_candidate_through_invitation(client, tenant)
     )
-    assert login.status_code == 200
-    token = login.json()["access_token"]
 
-    create_candidate = client.post(
-        "/api/v1/candidates",
-        json={"name": "Jane Doe", "email": "jane@example.com", "phone": "123456", "resume_url": "https://example.com/resume.pdf"},
-        headers={"Authorization": f"Bearer {token}"},
+    fetched = client.get(
+        f"/api/v1/candidates/{profile['candidate_id']}",
+        headers=tenant_headers(candidate_headers, tenant.organization_id),
     )
-    assert create_candidate.status_code == 200
-    candidate_id = create_candidate.json()["id"]
-
-    candidate = client.get(f"/api/v1/candidates/{candidate_id}", headers={"Authorization": f"Bearer {token}"})
-    assert candidate.status_code == 200
-    assert candidate.json()["email"] == "jane@example.com"
+    assert fetched.status_code == 200
+    assert fetched.json()["email"] == candidate["email"]
 
 
 def test_interview_report_export_flow(client: TestClient):
-    login = client.post(
-        "/api/v1/auth/login",
-        json={"email": TEST_ADMIN_EMAIL, "password": TEST_ADMIN_PASSWORD},
+    tenant = create_tenant(client)
+    candidate, candidate_headers, profile, _invitation = (
+        create_candidate_through_invitation(client, tenant)
     )
-    assert login.status_code == 200
-    token = login.json()["access_token"]
-    start = client.post(
-        "/api/v1/interview/start",
-        json={"candidate_id": "candidate-abc", "position": "AI Engineer", "mode": "text"},
-        headers={"Authorization": f"Bearer {token}"},
-    )
-    interview_id = start.json()["interview_id"]
+    start = start_interview(client, tenant, profile["candidate_id"])
+    interview_id = start["interview_id"]
 
-    client.post(
+    answer = client.post(
         f"/api/v1/interview/{interview_id}/answer",
-        json={"turn_id": "turn-report-1", "answer": "I have built Python and PyTorch models and deployed them to production."},
-        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "turn_id": f"turn-report-{uuid4()}",
+            "answer": (
+                "I have built Python and PyTorch models and deployed them to production."
+            ),
+        },
+        headers=tenant_headers(candidate_headers, tenant.organization_id),
     )
+    assert answer.status_code == 200
 
     report = client.post(
         f"/api/v1/interview/{interview_id}/report",
         params={"format": "json"},
-        headers={"Authorization": f"Bearer {token}"},
+        headers=tenant_headers(tenant.recruiter_headers, tenant.organization_id),
     )
     assert report.status_code == 200
     payload = report.json()

@@ -11,10 +11,11 @@ from voice.providers import FakeSTTProvider, FakeTTSProvider, FakeVADProvider, S
 logger = logging.getLogger(__name__)
 
 class VoiceSessionService:
-    def __init__(self, interview_service, user_id: str, role: str, *, vad: VADProvider | None = None, stt: STTProvider | None = None, tts: TTSProvider | None = None, max_chunk_bytes: int = 64 * 1024, max_buffer_bytes: int = 2 * 1024 * 1024, max_utterance_seconds: int = 120) -> None:
+    def __init__(self, interview_service, user_id: str, role: str, organization_id: str | None = None, *, vad: VADProvider | None = None, stt: STTProvider | None = None, tts: TTSProvider | None = None, max_chunk_bytes: int = 64 * 1024, max_buffer_bytes: int = 2 * 1024 * 1024, max_utterance_seconds: int = 120) -> None:
         self.interview_service = interview_service
         self.user_id = user_id
         self.role = role
+        self.organization_id = organization_id
         self.session_id = str(uuid4())
         self.vad = vad or FakeVADProvider()
         self.stt = stt or FakeSTTProvider()
@@ -28,7 +29,12 @@ class VoiceSessionService:
 
     async def handle(self, interview_id: str, event: ClientVoiceEvent) -> list[VoiceServerEvent]:
         if event.type.value == "session.start":
-            state = self.interview_service.get_interview(interview_id, self.user_id, self.role)
+            state = self.interview_service.get_interview(
+                interview_id,
+                self.user_id,
+                self.role,
+                self.organization_id,
+            )
             if state is None:
                 return [self.error(VoiceErrorCode.INTERVIEW_FORBIDDEN, "Interview is not available.")]
             return [VoiceServerEvent(type="session.ready", session_id=self.session_id)]
@@ -120,7 +126,14 @@ class VoiceSessionService:
                         confidence=transcript.confidence,
                     ))
                     try:
-                        result = self.interview_service.submit_answer(interview_id, transcript.text, event.utterance_id, self.user_id, self.role)
+                        result = self.interview_service.submit_answer(
+                            interview_id,
+                            transcript.text,
+                            event.utterance_id,
+                            self.user_id,
+                            self.role,
+                            self.organization_id,
+                        )
                     except Exception as exc:
                         logger.exception("Interview processing failed")
                         self.buffers.pop(event.utterance_id, None)

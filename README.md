@@ -107,13 +107,39 @@ pip install -r requirements-dev.txt
 
 # Setup environment
 cp .env.example .env
-# Edit .env with your API keys
+# The default deterministic mode needs no external AI API key.
 ```
 
 Development admin bootstrap is disabled by default. To opt in locally, set
 `ENABLE_DEV_ADMIN_BOOTSTRAP=true` and provide private `BOOTSTRAP_ADMIN_EMAIL` and
 `BOOTSTRAP_ADMIN_PASSWORD` values; never use shared/default credentials or enable it in
 production. Local API binding defaults to `127.0.0.1`.
+
+### Offline AI development
+
+By default, `LLM_PROVIDER=none` uses the platform's deterministic analysis and question
+rules, and `EMBEDDING_PROVIDER=none` keeps retrieval lexical-only. Evaluations identify
+themselves with `evaluator_type=deterministic`; these scores and feedback are development
+signals, not real AI evaluations.
+
+For fixed provider-interface fixtures, set `LLM_PROVIDER=mock`. Follow-up questions include
+`[MOCK QUESTION - NOT AI-GENERATED]`, interview state reports `question_source=mock`, and
+evaluations report `evaluator_type=mock` with an explicit synthetic-score disclaimer.
+Selecting `LLM_PROVIDER=openai` or `EMBEDDING_PROVIDER=openai` requires `OPENAI_API_KEY`;
+invalid provider configuration fails explicitly instead of switching to offline behavior.
+Live provider tests remain opt-in and are not needed for normal development or tests.
+
+To run the API with local dependencies and no AI credentials:
+
+```powershell
+docker compose up -d redis
+$env:LLM_PROVIDER = "none"
+$env:EMBEDDING_PROVIDER = "none"
+python -m uvicorn apps.api.main:app --host 127.0.0.1 --port 8000
+```
+
+Alternatively, `docker compose up -d postgres redis api` starts the API using the same
+offline defaults. No OpenAI, Groq, DeepSeek, or other AI provider credentials are required.
 
 ### Run with Docker Compose
 
@@ -155,6 +181,11 @@ completion, also receives `409 Conflict`. Role-forbidden operations remain `403 
 inaccessible interviews return `404 Not Found`; unavailable distributed locking returns
 `503 Service Unavailable`.
 
+The returned `question_source` identifies deterministic, mock, configured-provider, or
+deterministic-fallback question generation. Result and report evaluation metadata carries the
+corresponding `evaluator_type`; `mock` and `deterministic` results must not be represented as
+real AI assessments.
+
 ---
 
 ## 📚 Documentation
@@ -168,6 +199,7 @@ inaccessible interviews return `404 Not Found`; unavailable distributed locking 
 - [EVALUATION.md](docs/EVALUATION.md) - Evaluation framework
 - [DEPLOYMENT.md](docs/DEPLOYMENT.md) - Production deployment
 - [SECURITY.md](docs/SECURITY.md) - Security & fairness
+- [BACKEND_READINESS.md](docs/BACKEND_READINESS.md) - Verified backend scope and offline provider setup
 
 ---
 
@@ -303,15 +335,33 @@ make run-eval
 
 ## 💾 Environment Variables
 
-Copy `.env.example` to `.env` for the supported local configuration. It uses
-SQLite by default and disables live LLM calls until a provider is explicitly
-configured. CORS list values must remain JSON arrays.
+See `.env.example` for full list:
 
-Set `LLM_PROVIDER=openai` and provide `OPENAI_API_KEY` through a secure local
-environment or secret manager to enable question planning. Confirm that the
-configured model is available to the account before making provider requests.
-Do not copy sample PostgreSQL URLs or placeholder credentials into a development
-`.env`; use a dedicated database URL only for an intentional test or deployment.
+```env
+# API
+API_HOST=0.0.0.0
+API_PORT=8000
+
+# Database
+DATABASE_URL=postgresql://...
+SUPABASE_URL=...
+SUPABASE_KEY=...
+
+# LLM
+OPENAI_API_KEY=...
+ANTHROPIC_API_KEY=...
+
+# Voice
+ELEVEN_LABS_API_KEY=...
+ASSEMBLY_AI_API_KEY=...
+
+# Observability
+LANGWATCH_API_KEY=...
+SENTRY_DSN=...
+
+# Feature Flags
+LAUNCH_DARKLY_KEY=...
+```
 
 ---
 

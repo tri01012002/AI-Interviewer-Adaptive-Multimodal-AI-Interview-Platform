@@ -4,7 +4,7 @@ from datetime import datetime
 from typing import Any, Optional
 from uuid import UUID
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 
 class CandidateBase(BaseModel):
@@ -34,12 +34,11 @@ class CandidateUpdate(BaseModel):
 class CandidateResponse(CandidateBase):
     """Candidate response payload."""
 
+    model_config = ConfigDict(from_attributes=True)
+
     id: UUID
     created_at: datetime
     updated_at: datetime
-
-    class Config:
-        from_attributes = True
 
 
 class ErrorResponse(BaseModel):

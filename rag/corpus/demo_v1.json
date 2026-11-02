@@ -2,6 +2,8 @@
   "corpus_id": "interview-demo",
   "version": "demo-v1",
   "source": "synthetic-demo-corpus",
+  "scope": "global",
+  "scope_approval_reference": "repository:rag/corpus/demo_v1.json#demo-v1",
   "documents": [
     {
       "document_id": "python-concurrency-competency",
