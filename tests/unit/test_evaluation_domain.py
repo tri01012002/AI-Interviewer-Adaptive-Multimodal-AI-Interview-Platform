@@ -88,7 +88,6 @@ def test_answer_persists_evidence_assessment_and_versioned_competency_state():
         owner_role="candidate",
         organization_id=tenant.organization_id,
     )
-
     service.submit_answer(
         state["interview_id"],
         "I implemented a Python API and reduced latency by 40%.",

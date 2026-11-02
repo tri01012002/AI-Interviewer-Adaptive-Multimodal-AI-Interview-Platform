@@ -3,22 +3,14 @@
 from __future__ import annotations
 
 import json
-import secrets
-from hashlib import sha256
 from datetime import UTC, datetime
-from time import monotonic, sleep
 from typing import Any
 from uuid import uuid4
 
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy import select
 
-from agents.interview_agent.graph import (
-    InterviewAgentCore,
-    InterviewQuestionPlan,
-    QuestionPlanningError,
-)
+from agents.interview_agent.graph import InterviewAgentCore
 from config import settings
 from evaluation.service import (
     DeterministicEvaluator,
@@ -33,11 +25,7 @@ from infrastructure.distributed_lock import (
     RedisUnavailableError,
 )
 from infrastructure.redis_store import RedisClient, RedisStore
-from integrations.llm_providers.provider import (
-    LLMConfigurationError,
-    LLMProviderError,
-    provider_from_settings,
-)
+from integrations.llm_providers.provider import LLMProviderError, provider_from_settings
 from rag.service import RAGQuestionService
 from services.database import (
     CandidateRecord,
@@ -100,13 +88,7 @@ class InterviewService:
         redis_client: Any | None = None,
     ) -> None:
         self.rag = rag or RAGQuestionService()
-        self._llm_configuration_error: LLMConfigurationError | None = None
-        try:
-            llm_provider = provider_from_settings(settings)
-        except LLMConfigurationError as exc:
-            llm_provider = None
-            if agent is None:
-                self._llm_configuration_error = exc
+        llm_provider = provider_from_settings(settings)
         self.agent = agent or InterviewAgentCore(
             llm_provider=llm_provider,
             context_retriever=self._retrieve_graph_context,
@@ -123,28 +105,6 @@ class InterviewService:
         self.questions = QuestionRepository()
         self.redis_client = redis_client or (RedisClient(settings.REDIS_URL, namespace="interview") if settings.REDIS_URL else None)
         self.redis_store = RedisStore(self.redis_client, namespace="interview") if self.redis_client is not None else None
-
-    def _plan_questions(
-        self,
-        position: str,
-        job_description: str,
-        candidate_resume: str | None = None,
-    ) -> InterviewQuestionPlan:
-        """Plan questions from the JD; use the resume only when it is available."""
-        configuration_error = getattr(self, "_llm_configuration_error", None)
-        if configuration_error is not None:
-            raise QuestionPlanningError(
-                f"LLM provider configuration is unavailable: {configuration_error}"
-            ) from configuration_error
-        if not job_description or not job_description.strip():
-            raise QuestionPlanningError(
-                "question planning requires a non-empty job description"
-            )
-        return self.agent.plan_questions(
-            position,
-            job_description,
-            candidate_resume or "",
-        )
 
     def _get_processing_lock(self, interview_id: str) -> DistributedLock | None:
         if self.redis_client is None:
@@ -187,17 +147,7 @@ class InterviewService:
                 session, candidate_id, owner_user_id or "", owner_role, organization_id
             ) or candidate is None:
                 raise InterviewNotFoundError(candidate_id)
-
-        question_plan = self._plan_questions(
-            position,
-            job_description,
-            candidate_resume,
-        )
-        state = self.agent.start_interview(
-            candidate_id=candidate_id,
-            position=position,
-            question_plan=question_plan,
-        )
+        state = self.agent.start_interview(candidate_id=candidate_id, position=position)
         interview_id = str(uuid4())
         now = datetime.now(UTC).isoformat()
         state.update({
@@ -628,33 +578,15 @@ class InterviewService:
                     return state
                 asked_questions = self.questions.list_for_interview(session, interview_id)
                 asked_question = asked_questions[-1] if asked_questions else None
-                planned_questions = state.get("question_plan", {}).get("questions", [])
-                planned_index = int(
-                    state.get("planned_question_index", len(state.get("history", [])))
-                )
-                planned_question = (
-                    planned_questions[planned_index]
-                    if planned_index < len(planned_questions)
-                    else None
-                )
                 question_text = (
                     asked_question.question_text
                     if asked_question is not None
                     else state.get("current_question", "")
                 )
                 target_competency = (
-                    planned_question["proposal"]["competency"]
-                    if planned_question is not None
-                    else (
-                        (asked_question.competency if asked_question is not None else None)
-                        or state.get("current_competency")
-                        or "general"
-                    )
-                )
-                rubric = (
-                    Rubric.model_validate(planned_question["rubric"])
-                    if planned_question is not None
-                    else Rubric(competency=target_competency)
+                    (asked_question.competency if asked_question is not None else None)
+                    or state.get("current_competency")
+                    or "general"
                 )
                 campaign_criteria = [
                     criterion
@@ -712,18 +644,6 @@ class InterviewService:
                 updated_state["evaluation"] = evaluation
                 updated_state["overall_score"] = evaluation["overall_score"]
                 updated_state["recommended_next_action"] = updated_state["next_action"]
-                history_entry = updated_state["history"][-1]
-                history_entry.update(
-                    {
-                        "question": question_text,
-                        "rubric": rubric.model_dump(mode="json"),
-                        "assessment": result.assessment.model_dump(mode="json"),
-                        "is_follow_up": bool(state.get("awaiting_follow_up", False)),
-                        "planned_question_index": int(
-                            state.get("planned_question_index", 0)
-                        ),
-                    }
-                )
                 updated_state["updated_at"] = datetime.now(UTC).isoformat()
                 self.interviews.save_state(session, interview, updated_state, persisted_turn)
                 return updated_state
@@ -747,11 +667,10 @@ class InterviewService:
             str(state.get("position", "")),
             state.get("current_competency"),
             state.get("identified_gaps", []),
-            question=state.get("planning_query") or state.get("current_question"),
+            question=state.get("current_question"),
             answer_evidence=[str(state.get("candidate_answer", ""))],
             previous_questions=state.get("asked_questions", []),
             difficulty=state.get("difficulty"),
-            source_type=state.get("planning_source_type"),
             job_id=state.get("job_id") or state.get("interview_template_id"),
             organization_id=state.get("organization_id"),
         )

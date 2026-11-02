@@ -7,7 +7,6 @@ from datetime import datetime
 
 from fastapi import FastAPI, status
 from fastapi.exceptions import RequestValidationError
-from fastapi.encoders import jsonable_encoder
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from starlette.requests import Request
@@ -123,13 +122,12 @@ async def platform_support_audit_middleware(request: Request, call_next):
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request, exc):
     """Handle validation errors"""
-    errors = [
-        {key: value for key, value in error.items() if key != "ctx"}
-        for error in exc.errors()
-    ]
     return JSONResponse(
         status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-        content=jsonable_encoder({"detail": errors, "status_code": 422}),
+        content={
+            "detail": exc.errors(),
+            "status_code": 422,
+        },
     )
 
 

@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from sqlalchemy import select
 
@@ -16,7 +16,6 @@ from config import settings
 from services.database import (
     InterviewAssessmentRecord,
     InterviewEvidenceRecord,
-    InterviewQuestionRecord,
     InterviewRecord,
     InterviewTurnRecord,
     SessionLocal,
@@ -58,13 +57,6 @@ class ReportService:
                     .order_by(InterviewTurnRecord.sequence_number)
                 ).scalars()
             )
-            questions = list(
-                session.execute(
-                    select(InterviewQuestionRecord)
-                    .where(InterviewQuestionRecord.interview_id == interview_id)
-                    .order_by(InterviewQuestionRecord.sequence_number)
-                ).scalars()
-            )
             assessments = list(
                 session.execute(
                     select(InterviewAssessmentRecord)
@@ -80,55 +72,8 @@ class ReportService:
                 ).scalars()
             )
 
-        turn_by_id = {turn.id: turn for turn in turns}
-        question_by_id = {question.id: question for question in questions}
-        history = persisted_state.get("history") or []
-        history_by_sequence = {
-            index + 1: item
-            for index, item in enumerate(history)
-            if isinstance(item, dict)
-        }
-        evidence_by_turn: dict[str, list[dict[str, Any]]] = {}
-        for item in evidence:
-            turn = turn_by_id.get(item.turn_id)
-            answer = turn.candidate_answer if turn is not None else None
-            if not answer or not _contains_quote(answer, item.evidence_text):
-                continue
-            evidence_by_turn.setdefault(item.turn_id, []).append(
-                {
-                    "quote": item.evidence_text,
-                    "type": item.evidence_type,
-                    "strength": item.strength,
-                    "specificity": item.specificity,
-                    "ownership": item.ownership,
-                    "relevance": item.relevance,
-                    "evaluator": item.evaluator_type,
-                }
-            )
-
         competency_reports: dict[str, dict[str, Any]] = {}
         for assessment in assessments:
-            turn = turn_by_id.get(assessment.turn_id)
-            turn_history = history_by_sequence.get(turn.sequence_number, {}) if turn else {}
-            question = question_by_id.get(turn.question_id) if turn and turn.question_id else None
-            rubric = turn_history.get("rubric")
-            if rubric is None:
-                rubric = next(
-                    (
-                        item.get("rubric")
-                        for item in (persisted_state.get("question_plan") or {}).get("questions", [])
-                        if item.get("proposal", {}).get("question")
-                        == (turn_history.get("question") or (question.question_text if question else None))
-                    ),
-                    None,
-                )
-            recorded_assessment = turn_history.get("assessment") or {}
-            follow_up_index = turn_history.get("planned_question_index")
-            follow_up_status = (
-                persisted_state.get("follow_up_state", {}).get(str(follow_up_index))
-                if follow_up_index is not None
-                else None
-            )
             competency = competency_reports.setdefault(
                 assessment.competency,
                 {
@@ -138,7 +83,6 @@ class ReportService:
                     "strengths": [],
                     "gaps": [],
                     "evidence": [],
-                    "question_assessments": [],
                 },
             )
             if assessment.status != "not_assessed":
@@ -147,31 +91,28 @@ class ReportService:
             competency["statuses"].append(assessment.status)
             competency["strengths"].extend(json.loads(assessment.strengths_json))
             competency["gaps"].extend(json.loads(assessment.gaps_json))
-            competency["evidence"].extend(evidence_by_turn.get(assessment.turn_id, []))
-            competency["question_assessments"].append(
+
+        for item in evidence:
+            competency = competency_reports.setdefault(
+                item.competency,
                 {
-                    "turn_sequence": turn.sequence_number if turn else None,
-                    "question": turn_history.get("question")
-                    or (question.question_text if question else None),
-                    "answer_quote": turn.candidate_answer if turn else None,
-                    "is_follow_up": turn_history.get("is_follow_up"),
-                    "rubric": rubric,
-                    "rubric_status": "available" if rubric else "unavailable",
-                    "score": assessment.score,
-                    "score_scale": "0-5; based on the available evidence and rubric",
-                    "assessment_status": assessment.status,
-                    "confidence": assessment.confidence,
-                    "technical_correctness": recorded_assessment.get("technical_correctness"),
-                    "relevance": recorded_assessment.get("relevance"),
-                    "depth": recorded_assessment.get("depth"),
-                    "completeness": recorded_assessment.get("completeness"),
-                    "practical_experience": recorded_assessment.get("practical_experience"),
-                    "strengths": json.loads(assessment.strengths_json),
-                    "gaps": json.loads(assessment.gaps_json),
-                    "missing_evidence": recorded_assessment.get("missing_evidence", []),
-                    "rationale": assessment.rationale,
-                    "evidence_quotes": evidence_by_turn.get(assessment.turn_id, []),
-                    "follow_up_status": follow_up_status or "not_recorded",
+                    "scores": [],
+                    "confidence_values": [],
+                    "statuses": [],
+                    "strengths": [],
+                    "gaps": [],
+                    "evidence": [],
+                },
+            )
+            competency["evidence"].append(
+                {
+                    "quote": item.evidence_text,
+                    "type": item.evidence_type,
+                    "strength": item.strength,
+                    "specificity": item.specificity,
+                    "ownership": item.ownership,
+                    "relevance": item.relevance,
+                    "evaluator": item.evaluator_type,
                 }
             )
 
@@ -185,15 +126,8 @@ class ReportService:
             value for item in competency_reports.values() for value in item["strengths"]
         )
         gaps = _unique(value for item in competency_reports.values() for value in item["gaps"])
-        latest_evaluation = persisted_state.get("evaluation") or {}
-        missing_evidence_values = list(latest_evaluation.get("missing_evidence") or [])
-        missing_evidence_values.extend(
-            missing
-            for item in history
-            if isinstance(item, dict)
-            for missing in (item.get("assessment") or {}).get("missing_evidence", [])
-        )
-        missing_evidence = _unique(missing_evidence_values)
+        latest_evaluation = persisted_state.get("evaluation", {})
+        missing_evidence = _unique(latest_evaluation.get("missing_evidence", []))
         for values in competency_reports.values():
             values["score"] = (
                 round(sum(values["scores"]) / len(values["scores"]), 2)
@@ -268,11 +202,17 @@ class ReportService:
             "overall_score": round(sum(scores) / len(scores) * 20.0, 2) if scores else None,
             "competencies": competency_reports,
             "supporting_evidence": [
-                {"competency": competency, **item}
-                for competency, values in competency_reports.items()
-                for item in values["evidence"]
+                {
+                    "competency": item.competency,
+                    "quote": item.evidence_text,
+                    "type": item.evidence_type,
+                    "strength": item.strength,
+                    "specificity": item.specificity,
+                    "ownership": item.ownership,
+                    "relevance": item.relevance,
+                }
+                for item in evidence
             ],
-            "follow_up_results": _follow_up_results(persisted_state),
             "strengths": strengths,
             "gaps": gaps,
             "missing_evidence": missing_evidence,
@@ -340,51 +280,7 @@ class ReportService:
 
 
 def _unique(values: Any) -> list[str]:
-    return list(
-        dict.fromkeys(
-            str(value)
-            for value in (values or [])
-            if isinstance(value, str) and value
-        )
-    )
-
-
-def _contains_quote(answer: str, quote: str) -> bool:
-    def normalize(value: str) -> str:
-        return " ".join(value.split()).casefold()
-
-    return bool(quote.strip()) and normalize(quote) in normalize(answer)
-
-
-def _follow_up_results(state: dict[str, Any]) -> list[dict[str, Any]]:
-    plan = (state.get("question_plan") or {}).get("questions", [])
-    statuses = state.get("follow_up_state") or {}
-    history = [item for item in (state.get("history") or []) if isinstance(item, dict)]
-    results = []
-    for index, planned in enumerate(plan):
-        follow_up = next(
-            (
-                item
-                for item in history
-                if item.get("is_follow_up")
-                and item.get("planned_question_index") == index
-            ),
-            None,
-        )
-        results.append(
-            {
-                "planned_question_index": index,
-                "question": planned.get("proposal", {}).get("question"),
-                "status": statuses.get(str(index), "not_recorded"),
-                "follow_up_question": (
-                    follow_up.get("question") if follow_up is not None else None
-                ),
-                "follow_up_answer": (
-                    follow_up.get("answer") if follow_up is not None else None
-                ),
-            }
-        )
-    return results
+    return list(dict.fromkeys(str(value) for value in values if value))
 
 
 def _format_text_report(report: dict[str, Any]) -> str:
@@ -407,50 +303,9 @@ def _format_text_report(report: dict[str, Any]) -> str:
         "Areas requiring further assessment:",
         *[f"- {item}" for item in report["areas_requiring_further_assessment"]],
         "",
-        "Competency assessments:",
+        "AI recommendation:",
+        report["ai_recommendation"]["text"] or "No persisted AI recommendation is available.",
+        "",
+        report["decision_disclaimer"],
     ]
-    for competency, details in report["competencies"].items():
-        lines.extend(
-            [
-                f"- {competency}: score {details['score']} / 5; confidence {details['confidence']}",
-            ]
-        )
-        for item in details["question_assessments"]:
-            lines.extend(
-                [
-                    f"  Question: {item['question'] or 'Unavailable'}",
-                    f"  Score/status: {item['score']} / 5 ({item['assessment_status']})",
-                    f"  Candidate answer: {item['answer_quote'] or 'Unavailable'}",
-                    f"  Rubric: {json.dumps(item['rubric'], ensure_ascii=False) if item['rubric'] else 'Unavailable'}",
-                    f"  Follow-up: {item['follow_up_status']}",
-                ]
-            )
-            lines.extend(
-                f"  Evidence quote: {evidence['quote']}"
-                for evidence in item["evidence_quotes"]
-            )
-            lines.extend(
-                f"  Missing evidence: {missing}"
-                for missing in item["missing_evidence"]
-            )
-    lines.extend(
-        [
-            "",
-            "Follow-up results:",
-            *[
-                f"- {item['question']}: {item['status']}"
-                + (
-                    f"; follow-up: {item['follow_up_question']}"
-                    if item["follow_up_question"]
-                    else ""
-                )
-                for item in report["follow_up_results"]
-            ],
-            "",
-            "AI recommendation:",
-            report["ai_recommendation"]["text"] or "No persisted AI recommendation is available.",
-            "",
-            report["decision_disclaimer"],
-        ]
-    )
     return "\n".join(lines)

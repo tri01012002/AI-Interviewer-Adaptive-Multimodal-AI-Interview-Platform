@@ -1,8 +1,6 @@
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
-from tracemalloc import start
 from uuid import uuid4
-from wsgiref import headers
 
 import pytest
 from fastapi.testclient import TestClient
@@ -17,13 +15,6 @@ from tests.unit.tenant_test_utils import (
     start_interview,
     tenant_headers,
 )
-
-def configure_test_planning(monkeypatch):
-    service, _ = _configure_adaptive_service(
-        monkeypatch,
-        SampleAdaptiveEvaluator(),
-    )
-    return service
 
 
 @pytest.fixture

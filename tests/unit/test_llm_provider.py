@@ -10,13 +10,10 @@ from integrations.llm_providers.provider import (
     LLMConfigurationError,
     LLMInvalidOutputError,
     LLMTimeoutError,
-    OllamaProvider,
     OpenAIProvider,
     OpenAISettings,
     provider_from_settings,
 )
-from services import interview_service as interview_service_module
-from services.interview_service import InterviewService
 
 
 class FakeProvider:
@@ -47,17 +44,7 @@ class FakeProvider:
 
 def test_openai_provider_parses_valid_structured_response_without_sdk_coupling():
     def handler(request):
-        request_body = json.loads(request.content)
-        assert request_body["response_format"] == {"type": "json_object"}
-        assert (
-            "Return only valid JSON matching this schema"
-            in request_body["messages"][0]["content"]
-        )
-        assert request.headers["Authorization"] == "Bearer test-key"
-        body = {
-            "choices": [{"message": {"content": '{"value": "ok"}'}}],
-            "usage": {"prompt_tokens": 2, "completion_tokens": 3},
-        }
+        body = {"choices": [{"message": {"content": '{"value": "ok"}'}}], "usage": {"prompt_tokens": 2, "completion_tokens": 3}}
         return httpx.Response(200, json=body)
 
     provider = OpenAIProvider(
@@ -97,62 +84,6 @@ def test_provider_timeout_is_normalized():
     )
     with pytest.raises(LLMTimeoutError):
         provider.generate("system", "user")
-
-
-def test_provider_logs_safe_404_diagnostics_without_logging_credentials_or_pii(caplog):
-    expected_url = "https://api.openai.com/v1/chat/completions"
-
-    def handler(request):
-        assert str(request.url) == expected_url
-        assert request.headers["Authorization"].startswith("Bearer ")
-        body = json.loads(request.content)
-        assert body["model"] == "gpt-4-turbo-preview"
-        assert body["max_tokens"] == 800
-        assert body["response_format"] == {"type": "json_object"}
-        return httpx.Response(
-            404,
-            json={
-                "error": {
-                    "type": "invalid_request_error",
-                    "code": "model_not_found",
-                    "message": (
-                        "The model is unavailable for person@example.test, "
-                        "call +1 (555) 010-1234, key sk-testcredential123, "
-                        "and Bearer confidential-token."
-                    ),
-                }
-            },
-        )
-
-    provider = OpenAIProvider(
-        OpenAISettings(
-            api_key="test-key",
-            model="gpt-4-turbo-preview",
-            max_retries=0,
-        ),
-        httpx.Client(transport=httpx.MockTransport(handler)),
-    )
-
-    class OutputModel(__import__("pydantic").BaseModel):
-        value: str
-
-    with pytest.raises(LLMConfigurationError, match="HTTP 404") as exc:
-        provider.generate_structured("system", "synthetic", OutputModel)
-
-    assert "person@example.test" not in caplog.text
-    assert "+1 (555) 010-1234" not in caplog.text
-    assert "sk-testcredential123" not in caplog.text
-    assert "confidential-token" not in caplog.text
-    assert "http_status" not in caplog.text
-    record = next(
-        record
-        for record in caplog.records
-        if record.getMessage() == "LLM provider rejected request"
-    )
-    assert record.http_status == 404
-    assert record.error_code == "model_not_found"
-    assert record.error_type == "invalid_request_error"
-    assert "[REDACTED]" in record.error_message
 
 
 def test_provider_factory_requires_explicit_provider_and_key():

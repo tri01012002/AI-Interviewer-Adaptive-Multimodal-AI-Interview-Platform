@@ -878,7 +878,7 @@ def test_question_retrieval_reads_persisted_vectors_and_respects_job_scope(tmp_p
 
 @pytest.mark.live
 @pytest.mark.skipif(
-    not getattr(settings, "OPENAI_API_KEY", "") or settings.EMBEDDING_PROVIDER.lower() != "openai",
+    not settings.OPENAI_API_KEY or settings.EMBEDDING_PROVIDER.lower() != "openai",
     reason="live embedding smoke test requires OPENAI_API_KEY and EMBEDDING_PROVIDER=openai",
 )
 def test_live_openai_embedding_smoke():

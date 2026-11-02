@@ -170,183 +170,10 @@ class OpenAIEmbeddingProvider:
         return _validate_vector(vector, self.dimension)
 
 
-class QwenLocalEmbeddingProvider:
-    """CPU-only Qwen3 embeddings loaded strictly from local model files."""
-
-    model = "Qwen/Qwen3-Embedding-0.6B"
-    query_instruction = (
-        "Given a query about a candidate's skills and experience or a job's requirements, "
-        "retrieve the relevant passage."
-    )
-    max_length = 8192
-
-    def __init__(
-        self,
-        model_path: str | None = None,
-        revision: str | None = None,
-        *,
-        tokenizer: Any | None = None,
-        model: Any | None = None,
-    ) -> None:
-        self.model_path = model_path or settings.QWEN_EMBEDDING_MODEL_PATH
-        model_revision = revision or settings.QWEN_EMBEDDING_REVISION
-        if (tokenizer is None) != (model is None):
-            raise EmbeddingProviderError(
-                "Qwen tokenizer and model must be supplied together"
-            )
-        try:
-            import torch
-
-            if tokenizer is None or model is None:
-                from transformers import AutoModel, AutoTokenizer
-
-                tokenizer = AutoTokenizer.from_pretrained(
-                    self.model_path,
-                    revision=model_revision,
-                    local_files_only=True,
-                    padding_side="left",
-                )
-                model = AutoModel.from_pretrained(
-                    self.model_path,
-                    revision=model_revision,
-                    local_files_only=True,
-                    attn_implementation="eager",
-                )
-            self._torch = torch
-            self._functional = torch.nn.functional
-            self._tokenizer = tokenizer
-            self._model = model.to("cpu").eval()
-            self.dimension = int(self._model.config.hidden_size)
-            if self.dimension <= 0:
-                raise ValueError("model hidden size must be positive")
-        except Exception as exc:
-            raise EmbeddingProviderError(
-                f"local Qwen embedding model could not be loaded: {exc.__class__.__name__}"
-            ) from exc
-        self.version = (
-            f"{self.model}@{model_revision}:last-token-query-instruction-v1:"
-            f"{self.dimension}"
-        )
-
-    def embed(self, text: str) -> list[float]:
-        if not text.strip():
-            raise EmbeddingProviderError("cannot embed empty text")
-        query = f"Instruct: {self.query_instruction}\nQuery:{text}"
-        return self._encode(query)
-
-    def embed_document(self, text: str) -> list[float]:
-        if not text.strip():
-            raise EmbeddingProviderError("cannot embed empty text")
-        return self._encode(text)
-
-    def _encode(self, text: str) -> list[float]:
-        try:
-            inputs = self._tokenizer(
-                [text],
-                padding=True,
-                truncation=True,
-                max_length=self.max_length,
-                return_tensors="pt",
-            )
-            inputs = {key: value.to("cpu") for key, value in inputs.items()}
-            with self._torch.inference_mode():
-                output = self._model(**inputs)
-                attention_mask = inputs["attention_mask"]
-                if bool(self._torch.all(attention_mask[:, -1])):
-                    pooled = output.last_hidden_state[:, -1]
-                else:
-                    last_token_indices = attention_mask.sum(dim=1) - 1
-                    pooled = output.last_hidden_state[
-                        self._torch.arange(output.last_hidden_state.shape[0]),
-                        last_token_indices,
-                    ]
-                vector_tensor = self._functional.normalize(
-                    pooled.float(), p=2, dim=1
-                )
-                if vector_tensor.shape[-1] != self.dimension:
-                    raise EmbeddingProviderError(
-                        "Qwen output dimension does not match model hidden size"
-                    )
-                vector = vector_tensor[0].tolist()
-        except EmbeddingProviderError:
-            raise
-        except Exception as exc:
-            raise EmbeddingProviderError(
-                f"local Qwen embedding failed: {exc.__class__.__name__}"
-            ) from exc
-        return _validate_vector(vector, self.dimension)
-
-
-class DiskCachedEmbeddingProvider:
-    """Persist embedding vectors on disk to avoid recomputing them."""
-
-    def __init__(self, provider, cache_dir=None):
-        from pathlib import Path
-
-        self.provider = provider
-        self.model = provider.model
-        self.version = getattr(provider, "version", "v1")
-        self.dimension = provider.dimension
-        self.cache_dir = Path(cache_dir) if cache_dir else (
-            Path(__file__).resolve().parents[1]
-            / "storage"
-            / "embedding_cache"
-        )
-        self.cache_dir.mkdir(parents=True, exist_ok=True)
-
-    def _get_embedding(self, text, *, document=False):
-        kind = "document" if document else "query"
-        key_data = (
-            f"{self.model}|{self.version}|{self.dimension}|{kind}|{text}"
-        )
-        key = hashlib.sha256(key_data.encode("utf-8")).hexdigest()
-        cache_file = self.cache_dir / f"{key}.json"
-
-        if cache_file.exists():
-            try:
-                vector = json.loads(cache_file.read_text(encoding="utf-8"))
-                return _validate_vector(vector, self.dimension)
-            except Exception:
-                # Ignore invalid cache and recompute.
-                pass
-
-        if document:
-            vector = _embed_document(self.provider, text)
-        else:
-            vector = self.provider.embed(text)
-
-        vector = _validate_vector(vector, self.dimension)
-
-        try:
-            temp_file = cache_file.with_suffix(".tmp")
-            temp_file.write_text(
-                json.dumps(vector),
-                encoding="utf-8",
-            )
-            temp_file.replace(cache_file)
-        except OSError:
-            # Embedding still works even if caching fails.
-            pass
-
-        return vector
-
-    def embed(self, text):
-        return self._get_embedding(text)
-
-    def embed_document(self, text):
-        return self._get_embedding(text, document=True)
-
-
 def configured_embedding_provider() -> EmbeddingProvider | None:
     provider_name = settings.EMBEDDING_PROVIDER.lower()
-
     if provider_name == "none":
         return None
-
-    if provider_name == "qwen_local":
-        provider = QwenLocalEmbeddingProvider()
-        return DiskCachedEmbeddingProvider(provider)
-
     if provider_name != "openai":
         raise EmbeddingProviderError(f"unsupported embedding provider: {provider_name}")
     if not settings.OPENAI_API_KEY.strip():
@@ -359,22 +186,16 @@ def configured_embedding_provider() -> EmbeddingProvider | None:
 class DenseRetriever:
     def __init__(self, embedding_provider: EmbeddingProvider | None = None) -> None:
         self.embedding_provider = embedding_provider
-        self._cache: dict[tuple[bool, str], list[float]] = {}
+        self._cache: dict[str, list[float]] = {}
 
-    def _embed(self, text: str, *, document: bool = False) -> list[float]:
+    def _embed(self, text: str) -> list[float]:
         if self.embedding_provider is None:
             raise EmbeddingProviderError("semantic embedding provider is not configured")
-        key = (document, text)
-        if key not in self._cache:
-            vector = (
-                _embed_document(self.embedding_provider, text)
-                if document
-                else self.embedding_provider.embed(text)
+        if text not in self._cache:
+            self._cache[text] = _validate_vector(
+                self.embedding_provider.embed(text), self.embedding_provider.dimension
             )
-            self._cache[key] = _validate_vector(
-                vector, self.embedding_provider.dimension
-            )
-        return self._cache[key]
+        return self._cache[text]
 
     def retrieve(
         self, query: str, documents: list[DocumentChunk], filters: RetrievalFilters, top_k: int
@@ -387,7 +208,7 @@ class DenseRetriever:
         query_vector = self._embed(query)
         scored = []
         for document in filtered:
-            document_vector = self._embed(document.text, document=True)
+            document_vector = self._embed(document.text)
             score = _cosine(query_vector, document_vector)
             scored.append(RetrievedChunk(document, score, dense_score=score))
         return sorted(scored, key=lambda item: item.score, reverse=True)[:top_k]
@@ -565,8 +386,7 @@ class SQLAlchemyVectorStore:
                     embedding_version = existing.embedding_version
                 elif embedding_provider is not None:
                     vector = _validate_vector(
-                        _embed_document(embedding_provider, document.text),
-                        embedding_provider.dimension,
+                        embedding_provider.embed(document.text), embedding_provider.dimension
                     )
                     embedding = json.dumps(vector, separators=(",", ":"))
                     model = embedding_provider.model
@@ -865,7 +685,6 @@ class RAGQuestionService:
         answer_evidence: list[str] | None = None,
         previous_questions: list[str] | None = None,
         difficulty: str | None = None,
-        source_type: str | None = None,
         job_id: str | None = None,
         organization_id: str | None = None,
     ) -> RetrievalResult:
@@ -886,7 +705,6 @@ class RAGQuestionService:
                 query,
                 RetrievalFilters(
                     competency=competency,
-                    source_type=source_type,
                     job_id=scope_id or None,
                     organization_id=organization_id,
                     difficulty=difficulty,
@@ -959,13 +777,6 @@ class RAGQuestionService:
 
 def _tokens(text: str) -> list[str]:
     return re.findall(r"[a-z0-9_]+", text.lower())
-
-
-def _embed_document(provider: EmbeddingProvider, text: str) -> list[float]:
-    embed_document = getattr(provider, "embed_document", None)
-    if callable(embed_document):
-        return embed_document(text)
-    return provider.embed(text)
 
 
 def _scope_id(value: str | None) -> str:

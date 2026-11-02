@@ -7,7 +7,6 @@ from sqlalchemy import select
 from apps.api import main as api_main
 from apps.api.main import app
 from apps.api.v1.routes.interview import service as interview_service
-from agents.interview_agent.graph import QuestionPlanningError
 from integrations.llm_providers.provider import LLMTimeoutError
 from services.database import InterviewQuestionRecord, InterviewTurnRecord, SessionLocal
 from services.interview_service import InterviewProcessingError
@@ -70,28 +69,6 @@ def test_start_interview_endpoint(client: TestClient):
     assert payload["position"] == "AI Engineer"
     assert "introduce" in payload["current_question"].lower()
     assert payload["question_source"] == "deterministic"
-
-
-def test_start_interview_maps_question_planning_error_to_503(client, monkeypatch):
-    def fail_planning(*args, **kwargs):
-        raise QuestionPlanningError("synthetic planner failure")
-
-    monkeypatch.setattr(interview_service, "start_interview", fail_planning)
-    response = client.post(
-        "/api/v1/interview/start",
-        json={
-            "candidate_id": "candidate-planning-error",
-            "position": "AI Engineer",
-            "job_description": "Synthetic job description.",
-            "candidate_resume": "Synthetic candidate resume.",
-        },
-        headers=auth_headers(client),
-    )
-
-    assert response.status_code == 503
-    assert response.json() == {
-        "detail": "Interview question planning is temporarily unavailable"
-    }
 
 
 def test_submit_answer_endpoint_updates_state_and_scores(client: TestClient):

@@ -15,7 +15,6 @@ from services.interview_service import (
     InterviewForbiddenError,
     InterviewNotFoundError,
     InterviewProcessingError,
-    InterviewStartConflictError,
     InterviewService,
     InterviewUnavailableError,
 )
@@ -28,9 +27,6 @@ from services.support_access_audit import (
 )
 from services.tenant_authorization import TenantContext, tenant_context
 
-import logging
-
-logger = logging.getLogger(__name__)
 router = APIRouter()
 
 service = InterviewService()
@@ -43,9 +39,7 @@ class InterviewStartRequest(BaseModel):
     candidate_id: str = Field(..., min_length=1)
     position: str = Field(..., min_length=1)
     mode: str = "text"
-    job_description: str | None = Field(default=None, min_length=1)
-    candidate_resume: str | None = None
-    idempotency_key: str | None = Field(default=None, min_length=1, max_length=200)
+
 
 class CampaignInterviewStartRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -79,20 +73,6 @@ async def start_interview(
         )
     except InterviewNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Candidate not found") from exc
-    except InterviewStartConflictError as exc:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
-    except InterviewProcessingError as exc:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
-    except QuestionPlanningError as exc:
-        logger.error(
-            "Interview question planning failed: %s",
-            type(exc).__name__,
-            exc_info=(type(exc), exc, exc.__traceback__),
-        )
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Interview question planning is temporarily unavailable",
-        ) from exc
 
 
 @router.post(

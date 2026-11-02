@@ -1,13 +1,11 @@
-from __future__ import annotations
-
 import os
 import re
 import sys
 from pathlib import Path
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:
-    from docling.document_converter import DocumentConverter
+from docx2pdf import convert
+from docling.datamodel.base_models import InputFormat
+from docling.document_converter import DocumentConverter, PdfFormatOption
+from docling.datamodel.pipeline_options import PdfPipelineOptions
 
 # ==============================================================================
 # 1. HÀM CHUYỂN ĐỔI FILE SANG PDF (NẾU CHƯA PHẢI PDF)
@@ -44,10 +42,6 @@ def convert_to_pdf_if_needed(file_path: Path, temp_pdf_dir: Path) -> Path:
 
 
 def get_optimized_docling_converter() -> DocumentConverter:
-    from docling.datamodel.base_models import InputFormat
-    from docling.datamodel.pipeline_options import PdfPipelineOptions
-    from docling.document_converter import DocumentConverter, PdfFormatOption
-
     pipeline_options = PdfPipelineOptions()
     pipeline_options.do_ocr = False
     pipeline_options.do_table_structure = True

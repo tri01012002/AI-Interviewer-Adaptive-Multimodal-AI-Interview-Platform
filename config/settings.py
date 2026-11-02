@@ -3,9 +3,7 @@ AI Interviewer - Main application configuration
 """
 
 from functools import lru_cache
-from math import isfinite
-from pathlib import Path
-from typing import Any, Optional
+from typing import Optional
 
 from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -14,36 +12,6 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", case_sensitive=True)
     """Application settings"""
-
-    model_config = SettingsConfigDict(
-        env_file=_PROJECT_ROOT / ".env",
-        env_file_encoding="utf-8",
-        case_sensitive=True,
-        extra="forbid",
-        hide_input_in_errors=True,
-    )
-
-    @classmethod
-    def settings_customise_sources(
-        cls,
-        settings_cls: type[BaseSettings],
-        init_settings: PydanticBaseSettingsSource,
-        env_settings: PydanticBaseSettingsSource,
-        dotenv_settings: PydanticBaseSettingsSource,
-        file_secret_settings: PydanticBaseSettingsSource,
-    ) -> tuple[PydanticBaseSettingsSource, ...]:
-        strict_dotenv_settings = _LegacyAwareDotEnvSettingsSource(
-            settings_cls,
-            env_file=getattr(dotenv_settings, "env_file", _PROJECT_ROOT / ".env"),
-            env_file_encoding=getattr(dotenv_settings, "env_file_encoding", "utf-8"),
-            case_sensitive=getattr(dotenv_settings, "case_sensitive", True),
-        )
-        return (
-            init_settings,
-            env_settings,
-            strict_dotenv_settings,
-            file_secret_settings,
-        )
 
     # Application
     APP_NAME: str = "AI Interviewer"
@@ -106,20 +74,14 @@ class Settings(BaseSettings):
     CORS_ALLOW_HEADERS: list[str] = ["*"]
 
     # LLM Providers
-    LLM_PROVIDER: str = "none"
-    OLLAMA_BASE_URL: str = "http://localhost:11434/v1"
-    OLLAMA_MODEL: str = "qwen2.5:3b"
-    LLM_TIMEOUT_SECONDS: float = Field(default=20.0, gt=0, le=300)
-    LLM_MAX_RETRIES: int = Field(default=1, ge=0, le=5)
     OPENAI_API_KEY: str = ""
+    LLM_PROVIDER: str = "none"
+    LLM_TIMEOUT_SECONDS: float = 20.0
+    LLM_MAX_RETRIES: int = 1
     OPENAI_BASE_URL: str = "https://api.openai.com/v1"
-    OPENAI_MODEL: str = "gpt-4o-mini"
+    OPENAI_MODEL: str = "gpt-4-turbo-preview"
     OPENAI_TEMPERATURE: float = 0.7
-    OPENAI_MAX_TOKENS: int = Field(default=2000, gt=0)
-
-    RUN_LIVE_AI_TESTS: bool = False
-    RUN_LIVE_AI_E2E: bool = False
-    LIVE_AI_E2E_DATABASE_URL: str = "sqlite:///./storage/live_ai_e2e_isolated.db"
+    OPENAI_MAX_TOKENS: int = 2000
 
     ANTHROPIC_API_KEY: str = ""
     ANTHROPIC_MODEL: str = "claude-3-opus-20240229"
@@ -129,8 +91,6 @@ class Settings(BaseSettings):
     EMBEDDING_MODEL: str = "text-embedding-3-small"
     EMBEDDING_DIMENSION: int = 1536
     EMBEDDING_TIMEOUT_SECONDS: float = 10.0
-    QWEN_EMBEDDING_MODEL_PATH: str = "Qwen/Qwen3-Embedding-0.6B"
-    QWEN_EMBEDDING_REVISION: str = "97b0c614be4d77ee51c0cef4e5f07c00f9eb65b3"
 
     # Voice Services
     ELEVEN_LABS_API_KEY: str = ""
