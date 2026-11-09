@@ -329,6 +329,10 @@ class CandidateCommunicationService:
                     updated_at=now,
                 )
                 session.add(communication)
+                # Insert the parent row before its event row: without
+                # relationship() the unit of work does not order them, and
+                # PostgreSQL enforces the event's foreign key.
+                session.flush()
                 cls._record_transition(
                     session,
                     communication,
@@ -652,13 +656,31 @@ class CandidateCommunicationService:
             ).scalars().all()
             for communication in expired:
                 old_status = communication.status
-                communication.status = "needs_attention"
-                communication.delivery_status = "unknown"
-                communication.failure_code = "delivery_outcome_unknown"
-                communication.lease_token = None
-                communication.lease_expires_at = None
-                communication.available_at = None
-                communication.updated_at = now
+                # Conditional so that concurrent sweepers record the expiry
+                # once: the loser re-reads the committed row and matches 0.
+                changed = session.execute(
+                    update(CandidateCommunicationRecord)
+                    .execution_options(synchronize_session=False)
+                    .where(
+                        CandidateCommunicationRecord.id == communication.id,
+                        CandidateCommunicationRecord.status == "sending",
+                        CandidateCommunicationRecord.lease_token
+                        == communication.lease_token,
+                        CandidateCommunicationRecord.lease_expires_at <= now,
+                    )
+                    .values(
+                        status="needs_attention",
+                        delivery_status="unknown",
+                        failure_code="delivery_outcome_unknown",
+                        lease_token=None,
+                        lease_expires_at=None,
+                        available_at=None,
+                        updated_at=now,
+                    )
+                )
+                if changed.rowcount != 1:
+                    continue
+                session.refresh(communication)
                 cls._record_transition(
                     session,
                     communication,
