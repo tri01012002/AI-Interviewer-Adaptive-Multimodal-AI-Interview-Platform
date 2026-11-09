@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from apps.api.v1.schemas.recruitment import JobDescription
+from apps.api.v1.schemas.job import JobRequestFromUser
 from config import settings
 from integrations.llm_providers.provider import (
     LLMConfigurationError,
@@ -31,6 +31,6 @@ requirements that are not supported by the request. Return only the requested sc
                 f"Hiring request: {payload['hiring_request']}\n"
                 f"Additional requirements: {payload.get('requirements', [])}"
             ),
-            JobDescription,
+            JobRequestFromUser,
         )
         return JobStore.create(result.model_dump(), owner_user_id)

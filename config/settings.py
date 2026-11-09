@@ -79,7 +79,7 @@ class Settings(BaseSettings):
     CORS_ALLOW_HEADERS: list[str] = ["*"]
 
     # LLM Providers
-    LLM_PROVIDER: str = "none"
+    LLM_PROVIDER: str = "groq"
     LLM_TIMEOUT_SECONDS: float = 20.0
     LLM_MAX_RETRIES: int = 1
     OPENAI_API_KEY: str = ""
@@ -93,7 +93,12 @@ class Settings(BaseSettings):
     ANTHROPIC_MODEL: str = "claude-3-opus-20240229"
 
     GROQ_API_KEY: str = ""
-    GROQ_MODEL: str = "qwen/qwen3-32b"
+    GROQ_MODEL: str = "openai/gpt-oss-20b"
+    GROQ_BASE_URL: str = "https://api.groq.com/openai/v1"
+    
+    GROQ_TEMPERATURE: float = 0.7
+    GROQ_MAX_TOKENS: int = 2500
+
 
 
     # Embeddings

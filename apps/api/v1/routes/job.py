@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, status
 
-from apps.api.v1.schemas.recruitment import (
+from apps.api.v1.schemas.job import (
     GenerateJobRequest,
-    JobDescription,
+    JobRequestFromUser,
     JobResponse,
 )
 from integrations.llm_providers.provider import LLMProviderError
@@ -20,7 +20,7 @@ _current_user = Depends(current_user)
 jd_generation_service = JDGenerationService()
 
 @router.post("/jobs", response_model=JobResponse, tags=["Recruitment"])
-async def create_job(payload: JobDescription, user=_current_user) -> dict:
+async def create_job(payload: JobRequestFromUser, user=_current_user) -> dict:
     return JobStore.create(payload.model_dump(), user["id"])
 
 
@@ -44,11 +44,6 @@ async def approve_job(job_id: str, user=_current_user) -> dict:
     if job is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
     return job
-
-
-@router.get("/jobs", response_model=list[JobResponse], tags=["Recruitment"])
-async def list_jobs(user=_current_user) -> list[dict]:
-    return JobStore.list(user["id"])
 
 
 @router.get("/jobs/{job_id}", response_model=JobResponse, tags=["Recruitment"])
