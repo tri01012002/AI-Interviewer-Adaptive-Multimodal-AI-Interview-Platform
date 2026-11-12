@@ -5,7 +5,7 @@ from fastapi.testclient import TestClient
 
 from agents.supervisor_agent import SupervisorAgent
 from apps.api.main import app
-from apps.api.v1.schemas.job import JobReguestFromUser
+from apps.api.v1.schemas.job import JobDescription
 from services.auth_service import issue_token
 from services.jd_generation_service import JDGenerationService
 from services.user_store import UserStore
@@ -110,9 +110,9 @@ def test_supervisor_graph_rejects_unknown_task() -> None:
 def test_jd_generation_service_persists_structured_provider_result(monkeypatch) -> None:
     class FakeProvider:
         def generate_structured(self, system_instruction, user_content, schema):
-            assert schema is JobReguestFromUser
+            assert schema is JobDescription
             assert "Backend Engineer" in user_content
-            return JobReguestFromUser(
+            return JobDescription(
                 title="Backend Engineer",
                 description="Build reliable APIs.",
                 requirements=["Python"],

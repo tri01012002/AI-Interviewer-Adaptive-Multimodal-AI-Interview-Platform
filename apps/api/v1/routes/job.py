@@ -6,9 +6,14 @@ from fastapi import APIRouter, Depends, HTTPException, status
 
 from apps.api.v1.schemas.job import (
     GenerateJobRequest,
-    JobRequestFromUser,
+    JobDescription,
     JobResponse,
+    JobIntakeRequest, #
+    JobIntakeResponse,
+    
 )
+
+from services.job_request_parser_service import find_missing, job_request_parser, build_questions
 from integrations.llm_providers.provider import LLMProviderError
 from services.auth_service import current_user
 from services.jd_generation_service import JDGenerationService
@@ -20,7 +25,7 @@ _current_user = Depends(current_user)
 jd_generation_service = JDGenerationService()
 
 @router.post("/jobs", response_model=JobResponse, tags=["Recruitment"])
-async def create_job(payload: JobRequestFromUser, user=_current_user) -> dict:
+async def create_job(payload: JobDescription, user=_current_user) -> dict:
     return JobStore.create(payload.model_dump(), user["id"])
 
 
@@ -33,6 +38,22 @@ async def generate_job_description(payload: GenerateJobRequest, user=_current_us
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Job description generation is temporarily unavailable",
         ) from exc
+
+    
+@router.post("/jobs/generate-from-request", response_model=JobIntakeResponse, tags=["Recruitment"])
+async def generate_from_request(payload: JobIntakeRequest, user=_current_user) -> JobIntakeResponse:
+    try:
+        brief = payload.brief if payload.brief is not None else job_request_parser.parse(payload.raw_text)
+        missing = find_missing(brief)
+        if missing:
+            return JobIntakeResponse(status="needs_input", brief=brief, missing=build_questions(missing))
+        job = jd_generation_service.generate_from_brief(brief, user["id"])
+    except LLMProviderError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Job description generation is temporarily unavailable",
+        ) from exc
+    return JobIntakeResponse(status="created", brief=brief, job=job)
 
 
 @router.post("/jobs/{job_id}/approve", response_model=JobResponse, tags=["Recruitment"])

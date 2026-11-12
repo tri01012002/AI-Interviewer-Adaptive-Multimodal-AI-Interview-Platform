@@ -6,6 +6,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime
 
 from fastapi import FastAPI, status
+from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
@@ -125,7 +126,7 @@ async def validation_exception_handler(request, exc):
     return JSONResponse(
         status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
         content={
-            "detail": exc.errors(),
+            "detail": jsonable_encoder(exc.errors(), custom_encoder={Exception: str}),
             "status_code": 422,
         },
     )
@@ -238,6 +239,7 @@ from apps.api.v1.routes.auth import router as auth_router
 from apps.api.v1.routes.candidate import router as candidate_router
 from apps.api.v1.routes.interview import router as interview_router
 from apps.api.v1.routes.organizations import router as organizations_router
+from apps.api.v1.routes.job import router as job_router
 from apps.api.websocket.interview import router as websocket_router
 
 app.include_router(auth_router, prefix=settings.API_PREFIX)
@@ -245,6 +247,7 @@ app.include_router(account_linking_router, prefix=settings.API_PREFIX)
 app.include_router(candidate_router, prefix=settings.API_PREFIX)
 app.include_router(interview_router, prefix=settings.API_PREFIX)
 app.include_router(organizations_router, prefix=settings.API_PREFIX)
+app.include_router(job_router, prefix=settings.API_PREFIX)
 app.include_router(websocket_router)
 
 app.mount("/web", StaticFiles(directory="apps/web/src"), name="web")
