@@ -1,4 +1,11 @@
-"""Database-polled dispatcher for durable recruitment campaign executions."""
+"""Database-polled dispatcher for durable recruitment campaign executions.
+
+Observability: every work item runs inside ``run_work_item`` which binds its id
+to the log context (``execution_id`` / ``application_id`` / ``communication_id``)
+and records ``worker_work_items_total{kind,outcome}`` and
+``worker_work_item_duration_seconds``. Each heartbeat updates
+``worker_heartbeat_timestamp_seconds`` and ``worker_heartbeats_total``.
+"""
 
 from __future__ import annotations
 
@@ -7,9 +14,11 @@ import json
 import logging
 import signal
 import threading
+import time
+from collections.abc import Callable
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from datetime import UTC, datetime, timedelta
-from typing import Sequence
+from typing import Any, Sequence
 
 from sqlalchemy import func, select
 from sqlalchemy.exc import SQLAlchemyError
@@ -39,9 +48,36 @@ from services.recruitment_campaign_orchestrator import (
     CampaignExecutionResponse,
     RecruitmentCampaignOrchestrator,
 )
+from utils import metrics
+from utils.logger import bind_log_context
 
 logger = logging.getLogger(__name__)
 CONTROL_ID = CAMPAIGN_WORKER_CONTROL_ID
+
+_LOG_CONTEXT_FIELD_BY_KIND = {
+    "campaign_execution": "execution_id",
+    "candidate_application": "application_id",
+    "candidate_communication": "communication_id",
+}
+
+
+def run_work_item(kind: str, work_id: str, fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+    """Run one work item with its id bound to logs and its outcome metered.
+
+    Outcome: ``completed`` (a result was returned), ``skipped`` (``None``: the
+    item was no longer claimable) or ``error`` (raised; re-raised unchanged).
+    """
+    started = time.perf_counter()
+    outcome = "error"
+    try:
+        with bind_log_context(**{_LOG_CONTEXT_FIELD_BY_KIND.get(kind, "execution_id"): work_id}):
+            result = fn(work_id, *args, **kwargs)
+        outcome = "skipped" if result is None else "completed"
+        return result
+    finally:
+        labels = {"kind": kind, "outcome": outcome}
+        metrics.inc("worker_work_items_total", labels)
+        metrics.observe("worker_work_item_duration_seconds", time.perf_counter() - started, labels)
 
 
 def _control_record(session) -> RecruitmentCampaignWorkerControlRecord:
@@ -201,15 +237,19 @@ class RecruitmentCampaignWorker:
         )
         application_ids = CandidateApplicationService.discover_eligible(1)
         if application_ids:
-            application_result = CandidateApplicationService.process_dispatched(
-                application_ids[0]
+            application_result = run_work_item(
+                "candidate_application",
+                application_ids[0],
+                CandidateApplicationService.process_dispatched,
             )
             if application_result is not None:
                 results.append(application_result)
         communication_ids = CandidateCommunicationService.discover_eligible(1)
         if communication_ids:
-            communication_result = CandidateCommunicationService.process_dispatched(
-                communication_ids[0]
+            communication_result = run_work_item(
+                "candidate_communication",
+                communication_ids[0],
+                CandidateCommunicationService.process_dispatched,
             )
             if communication_result is not None:
                 results.append(communication_result)
@@ -247,8 +287,10 @@ class RecruitmentCampaignWorker:
                             )
                             for execution_id in execution_ids:
                                 future = executor.submit(
-                                    RecruitmentCampaignOrchestrator.run_dispatched,
+                                    run_work_item,
+                                    "campaign_execution",
                                     execution_id,
+                                    RecruitmentCampaignOrchestrator.run_dispatched,
                                     provider=self.provider,
                                 )
                                 active[future] = ("campaign_execution", execution_id)
@@ -261,8 +303,10 @@ class RecruitmentCampaignWorker:
                                 capacity
                             ):
                                 future = executor.submit(
-                                    CandidateApplicationService.process_dispatched,
+                                    run_work_item,
+                                    "candidate_application",
                                     application_id,
+                                    CandidateApplicationService.process_dispatched,
                                 )
                                 active[future] = ("candidate_application", application_id)
                                 logger.info(
@@ -274,8 +318,10 @@ class RecruitmentCampaignWorker:
                                 capacity
                             ):
                                 future = executor.submit(
-                                    CandidateCommunicationService.process_dispatched,
+                                    run_work_item,
+                                    "candidate_communication",
                                     communication_id,
+                                    CandidateCommunicationService.process_dispatched,
                                 )
                                 active[future] = (
                                     "candidate_communication",
@@ -291,8 +337,10 @@ class RecruitmentCampaignWorker:
                                     capacity
                                 )
                 except SQLAlchemyError as exc:
+                    metrics.inc("worker_loop_errors_total", {"error_category": "database"})
                     self._record_error(exc)
                 except Exception as exc:
+                    metrics.inc("worker_loop_errors_total", {"error_category": "unexpected"})
                     logger.error(
                         "Recruitment campaign worker loop failed",
                         extra={"failure_type": type(exc).__name__},
@@ -375,7 +423,10 @@ class RecruitmentCampaignWorker:
             control.heartbeat_at = now
             control.last_error = None
             control.updated_at = now
-            return control.paused
+            paused = control.paused
+        metrics.set_gauge("worker_heartbeat_timestamp_seconds", now.timestamp())
+        metrics.inc("worker_heartbeats_total", {"worker_state": "paused" if paused else "running"})
+        return paused
 
     @staticmethod
     def _record_error(exc: Exception) -> None:

@@ -8,6 +8,7 @@ from typing import Any, Literal
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, ConfigDict, Field
 
+from apps.api.middleware.rate_limit import interview_answer_rate_limit
 from services.interview_service import (
     CampaignInterviewNotReadyError,
     InterviewConflictError,
@@ -18,6 +19,7 @@ from services.interview_service import (
     InterviewService,
     InterviewUnavailableError,
 )
+from services.interview_views import interview_view_for_role
 from services.report_service import ReportService
 from services.support_access_audit import (
     DuplicateAuditRequest,
@@ -63,7 +65,7 @@ async def start_interview(
     if context.role in {"org_admin", "platform_admin"}:
         raise HTTPException(status_code=404, detail="Candidate not found")
     try:
-        return service.start_interview(
+        state = service.start_interview(
             payload.candidate_id,
             payload.position,
             payload.mode,
@@ -73,6 +75,7 @@ async def start_interview(
         )
     except InterviewNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Candidate not found") from exc
+    return interview_view_for_role(state, context.role)
 
 
 @router.post(
@@ -86,7 +89,7 @@ async def start_campaign_interview(
     context: TenantContext = Depends(tenant_context),
 ) -> dict[str, Any]:
     try:
-        return service.start_campaign_interview(
+        state = service.start_campaign_interview(
             campaign_id=campaign_id,
             application_id=application_id,
             schedule_id=payload.schedule_id,
@@ -105,16 +108,21 @@ async def start_campaign_interview(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Application not found",
         ) from exc
+    return interview_view_for_role(state, context.role)
 
 
-@router.post("/interview/{interview_id}/answer", tags=["Interview"])
+@router.post(
+    "/interview/{interview_id}/answer",
+    tags=["Interview"],
+    dependencies=[Depends(interview_answer_rate_limit)],
+)
 async def submit_answer(
     interview_id: str,
     payload: InterviewAnswerRequest,
     context: TenantContext = Depends(tenant_context),
 ) -> dict[str, Any]:
     try:
-        return service.submit_answer(
+        state = service.submit_answer(
             interview_id,
             payload.answer,
             payload.turn_id,
@@ -135,6 +143,7 @@ async def submit_answer(
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
     except InterviewNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Interview not found") from exc
+    return interview_view_for_role(state, context.role)
 
 
 @router.get("/interview/{interview_id}", tags=["Interview"])
@@ -150,16 +159,19 @@ async def get_interview(
     )
     if state is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Interview not found")
-    return state
+    return interview_view_for_role(state, context.role)
 
 
 @router.get("/interviews", tags=["Interview"])
 async def list_interviews(
     context: TenantContext = Depends(tenant_context),
 ) -> list[dict[str, Any]]:
-    return service.list_interviews(
-        context.actor_user_id, context.role, context.organization_id
-    )
+    return [
+        interview_view_for_role(state, context.role)
+        for state in service.list_interviews(
+            context.actor_user_id, context.role, context.organization_id
+        )
+    ]
 
 
 @router.post("/interview/{interview_id}/report", tags=["Interview"])

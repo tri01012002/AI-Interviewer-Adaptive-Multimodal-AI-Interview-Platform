@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import json
+import logging
 from typing import Any
 from uuid import uuid4
 
@@ -20,6 +23,8 @@ from services.user_store import UserStore
 from voice.contracts import ClientVoiceEvent, VoiceErrorCode, VoiceServerEvent
 from voice.factory import create_providers
 from voice.session import VoiceSessionService
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -122,64 +127,148 @@ async def voice_interview_socket(websocket: WebSocket, interview_id: str) -> Non
         max_buffer_bytes=settings.VOICE_MAX_BUFFER_BYTES,
         max_utterance_seconds=settings.VOICE_MAX_UTTERANCE_SECONDS,
     )
-    try:
-        await websocket.send_text(VoiceServerEvent(type="session.ready", session_id=session.session_id).model_dump_json())
+    await _run_voice_session(websocket, interview_id, session)
 
-        # Track current audio session for binary frame handling
-        current_utterance_id: str | None = None
 
-        while True:
-            # Support both JSON text messages (control) and binary frames (audio)
-            try:
-                message = await websocket.receive()
-            except WebSocketDisconnect:
-                break
+async def _run_voice_session(
+    websocket: WebSocket, interview_id: str, session: VoiceSessionService
+) -> None:
+    await _VoiceConnection(websocket, interview_id, session).run()
 
-            if message.get("type") == "websocket.receive" and "text" in message:
-                payload = message["text"]
-                try:
-                    event = ClientVoiceEvent.parse_json(payload, settings.VOICE_WS_MAX_MESSAGE_BYTES)
-                    responses = await session.handle(interview_id, event)
 
-                    # Track utterance_id for binary audio
-                    if event.type.value == "audio.start":
-                        current_utterance_id = event.utterance_id
-                    elif event.type.value == "audio.end":
-                        current_utterance_id = None
-                except ValueError as exc:
-                    responses = [session.error(VoiceErrorCode.INVALID_EVENT, str(exc))]
+class _VoiceConnection:
+    """Drive one voice session over a WebSocket.
 
-                for response in responses:
-                    await websocket.send_text(response.model_dump_json())
+    The receive loop never blocks on answer processing: ``audio.end`` runs in
+    one background task per session (a second ``audio.end`` while it runs gets
+    a retryable ``VOICE_TURN_IN_PROGRESS``), and its events, including each
+    ``tts.audio`` chunk, are sent as they are produced. Disconnect, cancel and
+    ``session.stop`` cancel that task; nothing is sent after the socket closes.
+    """
 
-            elif message.get("type") == "websocket.receive" and "bytes" in message:
-                # Binary audio frame handling
-                audio_bytes = message.get("bytes", b"")
-                if not current_utterance_id:
-                    error_response = session.error(VoiceErrorCode.PROTOCOL_ERROR, "No active audio session")
-                    await websocket.send_text(error_response.model_dump_json())
-                    continue
+    def __init__(
+        self, websocket: WebSocket, interview_id: str, session: VoiceSessionService
+    ) -> None:
+        self.websocket = websocket
+        self.interview_id = interview_id
+        self.session = session
+        self.closed = False
+        self.send_lock = asyncio.Lock()
+        self.processing: asyncio.Task | None = None
+        self.processing_utterance: str | None = None
+        # Utterance that binary audio frames are appended to.
+        self.current_utterance_id: str | None = None
 
-                if len(audio_bytes) > settings.VOICE_MAX_AUDIO_CHUNK_BYTES:
-                    error_response = session.error(VoiceErrorCode.AUDIO_TOO_LARGE, "Audio chunk exceeds size limit")
-                    await websocket.send_text(error_response.model_dump_json())
-                    continue
-
-                # Process binary audio as a chunk
-                responses = await session._audio_chunk_binary(current_utterance_id, audio_bytes)
-                for response in responses:
-                    await websocket.send_text(response.model_dump_json())
-
-    except Exception:
-        import logging
-        logging.exception("Voice session error")
+    async def run(self) -> None:
         try:
-            error_response = session.error(VoiceErrorCode.SESSION_ERROR, "Internal error")
-            await websocket.send_text(error_response.model_dump_json())
-        except Exception:
+            await self.send(
+                VoiceServerEvent(type="session.ready", session_id=self.session.session_id)
+            )
+            while not self.closed:
+                message = await self.websocket.receive()
+                message_type = message.get("type")
+                if message_type == "websocket.disconnect":
+                    break
+                if message_type != "websocket.receive":
+                    continue
+                if message.get("text") is not None:
+                    await self.on_text(message["text"])
+                elif message.get("bytes") is not None:
+                    await self.on_bytes(message["bytes"])
+        except WebSocketDisconnect:
             pass
-    finally:
-        await session.close()
+        except Exception:
+            logger.exception("Voice session error")
+            await self.send(self.session.error(VoiceErrorCode.SESSION_ERROR, "Internal error"))
+        finally:
+            self.closed = True
+            await self.stop_processing()
+            await self.session.close()
+
+    async def send(self, event: VoiceServerEvent) -> None:
+        if self.closed:
+            return
+        async with self.send_lock:
+            if self.closed:
+                return
+            try:
+                await self.websocket.send_text(event.model_dump_json())
+            except (WebSocketDisconnect, RuntimeError, OSError):
+                # Client went away mid-send; stop sending. The receive loop
+                # observes the disconnect and cleans up.
+                self.closed = True
+
+    async def pump(self, events) -> bool:
+        """Send every event from ``events``; return True if any was an error."""
+        had_error = False
+        async with contextlib.aclosing(events) as stream:
+            async for event in stream:
+                had_error = had_error or event.type == "error"
+                await self.send(event)
+        return had_error
+
+    async def stop_processing(self) -> None:
+        task = self.processing
+        self.processing, self.processing_utterance = None, None
+        if task is None:
+            return
+        if not task.done():
+            task.cancel()
+        # gather(return_exceptions) absorbs the child's CancelledError but
+        # still propagates cancellation of this coroutine itself.
+        (outcome,) = await asyncio.gather(task, return_exceptions=True)
+        if isinstance(outcome, Exception):
+            logger.error("Voice answer processing failed (%s)", type(outcome).__name__)
+
+    async def on_text(self, payload: str) -> None:
+        try:
+            event = ClientVoiceEvent.parse_json(payload, settings.VOICE_WS_MAX_MESSAGE_BYTES)
+        except ValueError as exc:
+            await self.send(self.session.error(VoiceErrorCode.INVALID_EVENT, str(exc)))
+            return
+        event_type = event.type.value
+        if event_type == "audio.end":
+            await self.start_answer(event)
+            return
+        if event_type == "utterance.cancel":
+            if event.utterance_id is None or event.utterance_id == self.current_utterance_id:
+                self.current_utterance_id = None
+            if self.processing_utterance is not None and self.processing_utterance == event.utterance_id:
+                # Stops transcript/TTS delivery; an answer already submitted
+                # to the interview service still completes.
+                await self.stop_processing()
+        elif event_type == "session.stop":
+            self.current_utterance_id = None
+            await self.stop_processing()
+        had_error = await self.pump(self.session.stream_events(self.interview_id, event))
+        if event_type == "audio.start" and not had_error:
+            self.current_utterance_id = event.utterance_id
+
+    async def start_answer(self, event: ClientVoiceEvent) -> None:
+        if self.processing is not None and not self.processing.done():
+            await self.send(self.session.error(
+                VoiceErrorCode.TURN_IN_PROGRESS,
+                "An answer is already being processed; retry after it completes.",
+                retryable=True,
+            ))
+            return
+        await self.stop_processing()  # reap the finished task, if any
+        self.current_utterance_id = None
+        self.processing_utterance = event.utterance_id
+        self.processing = asyncio.create_task(
+            self.pump(self.session.stream_events(self.interview_id, event)),
+            name=f"voice-answer-{self.session.session_id}",
+        )
+
+    async def on_bytes(self, audio_bytes: bytes) -> None:
+        if not self.current_utterance_id:
+            await self.send(self.session.error(VoiceErrorCode.PROTOCOL_ERROR, "No active audio session"))
+            return
+        if len(audio_bytes) > settings.VOICE_MAX_AUDIO_CHUNK_BYTES:
+            await self.send(self.session.error(VoiceErrorCode.AUDIO_TOO_LARGE, "Audio chunk exceeds size limit"))
+            return
+        for response in await self.session._audio_chunk_binary(self.current_utterance_id, audio_bytes):
+            await self.send(response)
 
 
 async def _authorize_websocket(

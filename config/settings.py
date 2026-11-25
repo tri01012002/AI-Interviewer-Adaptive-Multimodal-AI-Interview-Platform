@@ -54,19 +54,28 @@ class Settings(BaseSettings):
     INTERVIEW_RATE_LIMIT: int = 20
     VOICE_RATE_LIMIT: int = 60
     LLM_JOB_RATE_LIMIT: int = 5
+    # HTTP endpoint limits (fixed 60s window; see apps/api/middleware/rate_limit.py).
+    # Redis backend when REDIS_URL is set, in-process memory only when it is empty.
+    RATE_LIMIT_ENABLED: bool = True
+    RATE_LIMIT_ANSWER_PER_MINUTE: int = Field(default=30, ge=1)
+    RATE_LIMIT_CV_UPLOAD_PER_MINUTE: int = Field(default=10, ge=1)
+    RATE_LIMIT_LOGIN_PER_MINUTE: int = Field(default=10, ge=1)
+    # Redis errors admit the request (fail open) unless this is False (then 503).
+    RATE_LIMIT_FAIL_OPEN: bool = True
+    RATE_LIMIT_BACKEND_RETRY_SECONDS: float = Field(default=30.0, ge=0, le=600)
 
     # Observability
     OTEL_SERVICE_NAME: str = "ai-interviewer"
     OTEL_EXPORTER_OTLP_ENDPOINT: str | None = None
 
     # Security
-    SECRET_KEY: str = "your-secret-key-change-in-production"
+    SECRET_KEY: str = Field(default="your-secret-key-change-in-production", repr=False)
     ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
     REFRESH_TOKEN_EXPIRE_DAYS: int = 7
     ENABLE_DEV_ADMIN_BOOTSTRAP: bool = False
     BOOTSTRAP_ADMIN_EMAIL: str = ""
-    BOOTSTRAP_ADMIN_PASSWORD: str = ""
+    BOOTSTRAP_ADMIN_PASSWORD: str = Field(default="", repr=False)
 
     # CORS
     CORS_ALLOW_CREDENTIALS: bool = True
@@ -74,7 +83,7 @@ class Settings(BaseSettings):
     CORS_ALLOW_HEADERS: list[str] = ["*"]
 
     # LLM Providers
-    OPENAI_API_KEY: str = ""
+    OPENAI_API_KEY: str = Field(default="", repr=False)
     LLM_PROVIDER: str = "none"
     LLM_TIMEOUT_SECONDS: float = 20.0
     LLM_MAX_RETRIES: int = 1
@@ -83,7 +92,7 @@ class Settings(BaseSettings):
     OPENAI_TEMPERATURE: float = 0.7
     OPENAI_MAX_TOKENS: int = 2000
 
-    ANTHROPIC_API_KEY: str = ""
+    ANTHROPIC_API_KEY: str = Field(default="", repr=False)
     ANTHROPIC_MODEL: str = "claude-3-opus-20240229"
 
     # Embeddings
@@ -93,9 +102,9 @@ class Settings(BaseSettings):
     EMBEDDING_TIMEOUT_SECONDS: float = 10.0
 
     # Voice Services
-    ELEVEN_LABS_API_KEY: str = ""
+    ELEVEN_LABS_API_KEY: str = Field(default="", repr=False)
     ELEVEN_LABS_VOICE_ID: str = "default"
-    ASSEMBLY_AI_API_KEY: str = ""
+    ASSEMBLY_AI_API_KEY: str = Field(default="", repr=False)
 
     # Voice Settings
     VAD_THRESHOLD: float = 0.5
@@ -113,11 +122,20 @@ class Settings(BaseSettings):
     STT_MODEL: str = "local-fake"
     STT_TIMEOUT_SECONDS: float = 20.0
     STT_MAX_RETRIES: int = 1
+    # AssemblyAI pre-recorded flow: poll interval (AssemblyAI allows 60 polls/min
+    # per transcript, so >= 1s) and the total upload+transcribe+poll deadline.
+    STT_POLL_INTERVAL_SECONDS: float = Field(default=1.0, ge=1.0, le=30.0)
+    STT_TRANSCRIPT_DEADLINE_SECONDS: float = Field(default=60.0, gt=0, le=600.0)
     TTS_PROVIDER: str = "fake"
     TTS_MODEL: str = "local-fake"
     TTS_TIMEOUT_SECONDS: float = 20.0
     TTS_MAX_RETRIES: int = 1
     VOICE_TELEMETRY_ENABLED: bool = True
+    # Voice answers run InterviewService.submit_answer on a bounded thread pool
+    # (process-wide). When every slot is busy, an audio.end waits at most the
+    # queue timeout, then gets a retryable VOICE_BUSY error.
+    VOICE_ANSWER_MAX_CONCURRENCY: int = Field(default=4, ge=1, le=64)
+    VOICE_ANSWER_QUEUE_TIMEOUT_SECONDS: float = Field(default=5.0, ge=0, le=60.0)
 
     # RAG Configuration
     VECTOR_STORE_PROVIDER: str = "sqlalchemy_json"
@@ -138,8 +156,8 @@ class Settings(BaseSettings):
     FAIRNESS_CHECK_ENABLED: bool = True
 
     # Observability
-    SENTRY_DSN: Optional[str] = None
-    LANGWATCH_API_KEY: Optional[str] = None
+    SENTRY_DSN: Optional[str] = Field(default=None, repr=False)
+    LANGWATCH_API_KEY: Optional[str] = Field(default=None, repr=False)
     LANGWATCH_ENABLED: bool = True
 
     # Feature Flags
@@ -161,6 +179,8 @@ class Settings(BaseSettings):
     CAMPAIGN_WORKER_RETRY_BASE_SECONDS: int = Field(default=5, ge=1, le=3600)
     CAMPAIGN_WORKER_RETRY_MAX_SECONDS: int = Field(default=300, ge=1, le=86400)
     CAMPAIGN_WORKER_LEASE_SECONDS: int = Field(default=120, ge=10, le=3600)
+    # None renews every lease/3 seconds; values above lease/2 are clamped.
+    CAMPAIGN_WORKER_LEASE_RENEWAL_SECONDS: float | None = Field(default=None, gt=0, le=1800)
 
     # Email delivery is simulated unless an operator explicitly selects SMTP.
     EMAIL_PROVIDER: str = "offline_simulation"
@@ -176,6 +196,26 @@ class Settings(BaseSettings):
     STORAGE_PATH: str = "./storage"
     CV_STORAGE_PATH: str = "storage/private_cv"
     CV_MAX_UPLOAD_BYTES: int = Field(default=5 * 1024 * 1024, gt=0, le=25 * 1024 * 1024)
+
+    # Candidate data retention (services/retention_policy.py). Policy-neutral:
+    # no rule and no retention period is built in. Unset/empty means "no rules",
+    # so nothing is ever selected. Format: JSON list of rules, see
+    # docs/RETENTION_POLICY_DECISIONS.md. Destructive execution additionally
+    # requires RETENTION_EXECUTION_ENABLED=true and an explicit --execute flag.
+    RETENTION_RULES_JSON: str | None = None
+    RETENTION_EXECUTION_ENABLED: bool = False
+    # Safety cap on candidates erased per organization per run (not a policy value).
+    RETENTION_MAX_CANDIDATES_PER_RUN: int = Field(default=100, ge=1, le=10000)
+
+    # Metrics (utils/metrics.py, GET /metrics; see docs/OBSERVABILITY.md).
+    # Requires prometheus-client; without it metrics are a no-op.
+    METRICS_ENABLED: bool = True
+    # When set, GET /metrics requires "Authorization: Bearer <token>". In
+    # production /metrics returns 404 unless a token is configured.
+    METRICS_BEARER_TOKEN: SecretStr | None = Field(default=None, repr=False)
+    # Optional operator-supplied LLM prices; unset means no cost metric is emitted.
+    LLM_COST_PER_1K_PROMPT_TOKENS_USD: float | None = Field(default=None, ge=0)
+    LLM_COST_PER_1K_COMPLETION_TOKENS_USD: float | None = Field(default=None, ge=0)
 
 
 

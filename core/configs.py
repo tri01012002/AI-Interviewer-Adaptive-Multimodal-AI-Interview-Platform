@@ -25,10 +25,12 @@ class EnvConfig(BaseSettings):
     # API Keys
     # =========================
 
-    groq_api_key: Optional[str] = None
-    openai_api_key: Optional[str] = None
-    openrouter_api_key: Optional[str] = None
-    anthropic_api_key: Optional[str] = None
+    # repr=False keeps keys out of repr()/str() of the config object
+    # (tracebacks, debug prints) while leaving the values usable as plain strings.
+    groq_api_key: Optional[str] = Field(default=None, repr=False)
+    openai_api_key: Optional[str] = Field(default=None, repr=False)
+    openrouter_api_key: Optional[str] = Field(default=None, repr=False)
+    anthropic_api_key: Optional[str] = Field(default=None, repr=False)
 
     # =========================
     # Models
@@ -46,7 +48,7 @@ class EnvConfig(BaseSettings):
     # =========================
 
     qdrant_url: Optional[str] = None
-    qdrant_api_key: Optional[str] = None
+    qdrant_api_key: Optional[str] = Field(default=None, repr=False)
     qdrant_collection: str = "interview_ai"
 
     # =========================
@@ -102,5 +104,5 @@ MAX_UPLOAD_MB = 20
 
 # from src.app_logging import setup_logging
 # setup_logging()
-print("model : ",env_config.model)
-print("api_key : ",env_config.groq_api_key)
+# Never print configuration values at import time: API keys must not reach
+# consoles, CI logs, or log files.

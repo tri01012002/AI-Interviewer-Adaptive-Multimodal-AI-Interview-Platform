@@ -5,12 +5,14 @@ from __future__ import annotations
 import json
 import logging
 import random
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from time import perf_counter
 from typing import Any, Protocol, TypeVar
 
 import httpx
 from pydantic import BaseModel, ValidationError
+
+from utils import metrics
 
 T = TypeVar("T", bound=BaseModel)
 logger = logging.getLogger(__name__)
@@ -36,6 +38,28 @@ class LLMInvalidOutputError(LLMProviderError):
     """Provider output could not be validated against the requested schema."""
 
 
+_ERROR_CATEGORY_BY_MESSAGE = {
+    "LLM provider server failure": "server_error",
+    "LLM provider network failure": "network",
+    "LLM provider returned an invalid response": "invalid_response",
+}
+
+
+def _error_category(exc: BaseException) -> str:
+    """Map a provider failure onto a fixed, low-cardinality metric category."""
+    if isinstance(exc, LLMConfigurationError):
+        return "auth"
+    if isinstance(exc, LLMRateLimitError):
+        return "rate_limited"
+    if isinstance(exc, LLMTimeoutError):
+        return "timeout"
+    if isinstance(exc, LLMProviderError):
+        return _ERROR_CATEGORY_BY_MESSAGE.get(str(exc), "http_error")
+    if isinstance(exc, ValueError):  # undecodable JSON body
+        return "invalid_response"
+    return "http_error"
+
+
 class LLMProvider(Protocol):
     provider_name: str
     model: str
@@ -50,7 +74,7 @@ class LLMProvider(Protocol):
 
 @dataclass(frozen=True)
 class OpenAISettings:
-    api_key: str
+    api_key: str = field(repr=False)
     model: str
     base_url: str = "https://api.openai.com/v1"
     timeout_seconds: float = 20.0
@@ -74,6 +98,52 @@ class OpenAIProvider:
         self._client = client or httpx.Client(timeout=settings.timeout_seconds)
 
     def generate(self, system_instruction: str, user_content: str) -> str:
+        return self._complete(system_instruction, user_content, "generate")
+
+    def _complete(self, system_instruction: str, user_content: str, operation: str) -> str:
+        """One logical completion (retries included), recorded in ``utils.metrics``.
+
+        Metric labels are provider / operation / outcome / error category only;
+        prompts, outputs and credentials never reach metrics.
+        """
+        started = perf_counter()
+        try:
+            content, usage = self._request_completion(system_instruction, user_content, operation, started)
+        except Exception as exc:
+            self._record_request(operation, "error", _error_category(exc), started)
+            raise
+        self._record_request(operation, "success", None, started)
+        self._record_usage(usage)
+        return content
+
+    def _record_request(self, operation: str, outcome: str, error_category: str | None, started: float) -> None:
+        labels = {"provider": self.provider_name, "operation": operation, "outcome": outcome}
+        metrics.inc("llm_requests_total", {**labels, "error_category": error_category})
+        metrics.observe("llm_request_duration_seconds", perf_counter() - started, labels)
+
+    def _record_usage(self, usage: Any) -> None:
+        if not isinstance(usage, dict):
+            return
+        from config import settings as app_settings
+
+        prices = {
+            "prompt": getattr(app_settings, "LLM_COST_PER_1K_PROMPT_TOKENS_USD", None),
+            "completion": getattr(app_settings, "LLM_COST_PER_1K_COMPLETION_TOKENS_USD", None),
+        }
+        for kind, field_name in (("prompt", "prompt_tokens"), ("completion", "completion_tokens")):
+            tokens = usage.get(field_name)
+            if not isinstance(tokens, int) or isinstance(tokens, bool) or tokens < 0:
+                continue
+            labels = {"provider": self.provider_name, "kind": kind}
+            metrics.inc("llm_tokens_total", labels, tokens)
+            price = prices[kind]
+            # Cost is only estimated from operator-configured prices; never invented.
+            if price is not None and tokens:
+                metrics.inc("llm_estimated_cost_usd_total", labels, tokens / 1000 * float(price))
+
+    def _request_completion(
+        self, system_instruction: str, user_content: str, operation: str, started: float
+    ) -> tuple[str, Any]:
         payload = {
             "model": self.model,
             "temperature": self.settings.temperature,
@@ -83,7 +153,6 @@ class OpenAIProvider:
                 {"role": "user", "content": user_content},
             ],
         }
-        started = perf_counter()
         for attempt in range(self.settings.max_retries + 1):
             try:
                 response = self._client.post(
@@ -106,20 +175,22 @@ class OpenAIProvider:
                     content = body["choices"][0]["message"]["content"]
                 except (KeyError, IndexError, TypeError) as exc:
                     raise LLMProviderError("LLM provider returned an invalid response") from exc
+                usage = body.get("usage") if isinstance(body, dict) else None
+                usage_fields = usage if isinstance(usage, dict) else {}
                 logger.info(
                     "llm request completed",
                     extra={
-                        "operation": "generate",
+                        "operation": operation,
                         "provider": self.provider_name,
                         "model": self.model,
                         "latency_ms": round((perf_counter() - started) * 1000, 2),
                         "retry_count": attempt,
                         "prompt_version": self.prompt_version,
-                        "input_tokens": body.get("usage", {}).get("prompt_tokens"),
-                        "output_tokens": body.get("usage", {}).get("completion_tokens"),
+                        "input_tokens": usage_fields.get("prompt_tokens"),
+                        "output_tokens": usage_fields.get("completion_tokens"),
                     },
                 )
-                return str(content)
+                return str(content), usage
             except httpx.TimeoutException as exc:
                 if attempt >= self.settings.max_retries:
                     raise LLMTimeoutError("LLM provider timed out") from exc
@@ -136,10 +207,11 @@ class OpenAIProvider:
             f"{json.dumps(schema.model_json_schema(), separators=(',', ':'))}"
         )
         for attempt in range(self.settings.max_retries + 1):
-            raw = self.generate(structured_instruction, user_content)
+            raw = self._complete(structured_instruction, user_content, "generate_structured")
             try:
                 return schema.model_validate_json(raw)
             except (ValidationError, ValueError, TypeError) as exc:
+                metrics.inc("llm_structured_output_invalid_total", {"provider": self.provider_name})
                 if attempt >= self.settings.max_retries:
                     raise LLMInvalidOutputError("LLM structured output failed schema validation") from exc
                 self._backoff(attempt)

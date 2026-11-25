@@ -15,6 +15,7 @@ from typing import Any, Literal, Protocol
 from rank_bm25 import BM25Okapi
 
 from config import settings
+from utils import metrics
 
 DEMO_CORPUS_GLOBAL_APPROVAL_REFERENCE = (
     "repository:rag/corpus/demo_v1.json#demo-v1"
@@ -79,6 +80,37 @@ class RetrievalFilters:
     organization_id: str | None = None
     include_global: bool = False
     active: bool = True
+    # Campaign-scoped chunks carry job_id == campaign_scope_key(campaign_id) and are
+    # returned only when this filter names that campaign.
+    campaign_id: str | None = None
+    # Controlled role-family ids (see job_scope_ids) accepted alongside job_id.
+    # Never campaign keys: campaign scope is granted only through campaign_id.
+    job_aliases: tuple[str, ...] = ()
+
+    def allowed_job_ids(self) -> tuple[str, ...]:
+        allowed = []
+        if self.job_id:
+            allowed.append(self.job_id)
+            allowed.extend(
+                alias
+                for alias in self.job_aliases
+                if alias
+                and alias not in allowed
+                and not alias.startswith(CAMPAIGN_SCOPE_PREFIX)
+            )
+        if self.campaign_id:
+            allowed.append(campaign_scope_key(self.campaign_id))
+        return tuple(allowed)
+
+
+CAMPAIGN_SCOPE_PREFIX = "campaign:"
+
+
+def campaign_scope_key(campaign_id: str) -> str:
+    """job_id value that restricts an organization chunk to one recruitment campaign."""
+    if not isinstance(campaign_id, str) or not campaign_id.strip():
+        raise ValueError("campaign scope requires a campaign id")
+    return f"{CAMPAIGN_SCOPE_PREFIX}{campaign_id.strip()}"
 
 
 @dataclass(frozen=True)
@@ -101,6 +133,42 @@ class RetrievalResult:
     embedding_version: str = "not_configured"
     reranker_version: str = "term-coverage-v1"
     fallback_reason: str | None = None
+
+
+class RetrievedContext(str):
+    """Formatted untrusted context text that also carries its source references.
+
+    It is a ``str`` so existing consumers keep working; ``sources`` lists the
+    ``{document_id, chunk_id, scope}`` of each chunk included in the text.
+    """
+
+    sources: tuple[dict[str, str], ...]
+
+    def __new__(
+        cls, text: str, sources: list[dict[str, str]] | tuple[dict[str, str], ...] = ()
+    ) -> RetrievedContext:
+        instance = super().__new__(cls, text)
+        instance.sources = tuple(dict(source) for source in sources)
+        return instance
+
+
+def source_reference(chunk: DocumentChunk) -> dict[str, str]:
+    """Traceable id of a retrieved chunk; never includes chunk text."""
+    return {
+        "document_id": chunk.document_id,
+        "chunk_id": chunk.chunk_id,
+        "scope": chunk.scope,
+    }
+
+
+def _source_visible_to(chunk: DocumentChunk, organization_id: str | None) -> bool:
+    if _is_verified_global(chunk):
+        return True
+    return (
+        chunk.scope == "organization"
+        and organization_id is not None
+        and chunk.organization_id == organization_id
+    )
 
 
 class EmbeddingProvider(Protocol):
@@ -400,7 +468,9 @@ class SQLAlchemyVectorStore:
                 values = {
                     "text": document.text,
                     "document_type": document.source_type,
-                    "competency_id": document.competency,
+                    # Stored canonical so the SQL competency filter matches the
+                    # normalized query-side id ("general" is stored as generic).
+                    "competency_id": normalize_competency(document.competency),
                     "job_id": document.job_id or _scope_id(document.job_role) or None,
                     "organization_id": document.organization_id,
                     "scope": document.scope,
@@ -483,9 +553,13 @@ class SQLAlchemyVectorStore:
     @staticmethod
     def _filtered_query(query: Any, model: Any, filters: RetrievalFilters) -> Any:
         query = query.filter(model.active.is_(filters.active))
-        job_id = filters.job_id or (_scope_id(filters.job_role) if filters.job_role else None)
+        allowed_job_ids = filters.allowed_job_ids()
+        if not allowed_job_ids and filters.job_role:
+            allowed_job_ids = (_scope_id(filters.job_role),)
         for column, value, allow_global in (
-            (model.competency_id, filters.competency, True),
+            # NULL competency/difficulty chunks are generic and match any filter;
+            # _matches applies the same rule to in-memory candidates.
+            (model.competency_id, normalize_competency(filters.competency), True),
             (model.document_type, filters.source_type, False),
             (model.version, filters.version, False),
             (model.language, filters.language, False),
@@ -496,10 +570,12 @@ class SQLAlchemyVectorStore:
                     query = query.filter((column == value) | column.is_(None))
                 else:
                     query = query.filter(column == value)
-        if job_id is None:
+        if not allowed_job_ids:
             query = query.filter(model.job_id.is_(None))
         else:
-            query = query.filter((model.job_id == job_id) | model.job_id.is_(None))
+            query = query.filter(
+                model.job_id.in_(allowed_job_ids) | model.job_id.is_(None)
+            )
         if filters.organization_id is None:
             if filters.include_global:
                 query = query.filter(
@@ -561,7 +637,24 @@ class HybridRetriever:
     def retrieve(
         self, query: str, filters: RetrievalFilters | None = None, top_k: int = 5
     ) -> RetrievalResult:
+        """Retrieve and record ``rag_retrievals_total{outcome=hit|miss|error}``,
+        latency and selected chunk count (no query text or scope ids in labels)."""
         started = perf_counter()
+        try:
+            result = self._retrieve(query, filters, top_k, started)
+        except Exception:
+            metrics.inc("rag_retrievals_total", {"outcome": "error"})
+            metrics.observe("rag_retrieval_duration_seconds", perf_counter() - started, {"outcome": "error"})
+            raise
+        outcome = "hit" if result.chunks else "miss"
+        metrics.inc("rag_retrievals_total", {"outcome": outcome})
+        metrics.observe("rag_retrieval_duration_seconds", perf_counter() - started, {"outcome": outcome})
+        metrics.observe("rag_retrieved_chunks", len(result.chunks))
+        return result
+
+    def _retrieve(
+        self, query: str, filters: RetrievalFilters | None, top_k: int, started: float
+    ) -> RetrievalResult:
         if not query.strip() or top_k <= 0:
             return RetrievalResult(query, [], 0, 0, False, fallback_reason="empty_query_or_invalid_top_k")
         active_filters = filters or RetrievalFilters()
@@ -687,6 +780,7 @@ class RAGQuestionService:
         difficulty: str | None = None,
         job_id: str | None = None,
         organization_id: str | None = None,
+        campaign_id: str | None = None,
     ) -> RetrievalResult:
         query = " ".join(
             item
@@ -704,9 +798,11 @@ class RAGQuestionService:
             return self.retriever.retrieve(
                 query,
                 RetrievalFilters(
-                    competency=competency,
+                    competency=normalize_competency(competency),
                     job_id=scope_id or None,
+                    job_aliases=_job_aliases(job_id, position, scope_id),
                     organization_id=organization_id,
+                    campaign_id=campaign_id,
                     difficulty=difficulty,
                     include_global=True,
                 ),
@@ -722,7 +818,18 @@ class RAGQuestionService:
             )
 
     def format_context(self, result: RetrievalResult) -> str:
+        return str(self.format_context_with_sources(result))
+
+    def format_context_with_sources(
+        self, result: RetrievalResult, organization_id: str | None = None
+    ) -> RetrievedContext:
+        """Formatted context plus references to the chunks that made it into the text.
+
+        References carry ids and scope only (never chunk text). Defensively, a
+        non-global chunk is referenced only when it belongs to ``organization_id``.
+        """
         parts = []
+        sources: list[dict[str, str]] = []
         lexical_only = result.fallback_reason is not None and (
             result.fallback_reason.startswith("semantic_embeddings_unconfigured")
             or result.fallback_reason.startswith("no_matching_semantic_vectors")
@@ -737,20 +844,34 @@ class RAGQuestionService:
             text = (attribution + item.chunk.text)[:remaining]
             parts.append(text)
             remaining -= len(text)
+            if text and _source_visible_to(item.chunk, organization_id):
+                sources.append(source_reference(item.chunk))
             if remaining <= 0:
                 break
-        return capability + "\n".join(parts)
+        return RetrievedContext(capability + "\n".join(parts), sources)
 
-    def retrieve_relevant_questions(self, position: str, skills: dict[str, object]) -> list[str]:
+    def retrieve_relevant_questions(
+        self,
+        position: str,
+        skills: dict[str, object],
+        *,
+        organization_id: str | None = None,
+        campaign_id: str | None = None,
+    ) -> list[str]:
+        """Without organization_id only the approved global corpus is searchable."""
         competency = next(iter(skills), None)
         gaps = skills.get(competency, {}).get("gaps", []) if competency and isinstance(skills.get(competency), dict) else []
         try:
+            scope_id = _scope_id(position)
             result = self.retriever.retrieve(
                 self.build_gap_query(position, competency, gaps),
                 RetrievalFilters(
-                    competency=competency,
-                    job_id=_scope_id(position) or None,
+                    competency=normalize_competency(competency),
+                    job_id=scope_id or None,
+                    job_aliases=_job_aliases(None, position, scope_id),
                     source_type="interview_question",
+                    organization_id=organization_id,
+                    campaign_id=campaign_id,
                     include_global=True,
                 ),
                 top_k=4,
@@ -775,14 +896,155 @@ class RAGQuestionService:
         return result.chunks[0].chunk.text if result.chunks else "Please provide a concrete example and measurable result."
 
 
+# Tokens that end in "s" but must never be singularized. Words ending in "ss",
+# "us" or "is" are protected by rule (process, status, analysis, redis).
+_PROTECTED_TOKENS = frozenset(
+    {
+        "always",
+        "aws",
+        "does",
+        "devops",
+        "express",
+        "https",
+        "ios",
+        "jenkins",
+        "keras",
+        "kubernetes",
+        "macos",
+        "mlops",
+        "news",
+        "pandas",
+        "perhaps",
+        "postgres",
+        "series",
+        "sometimes",
+        "species",
+        "whereas",
+    }
+)
+
+
+def _normalize_token(token: str) -> str:
+    """Conservative plural stripping; deliberately not a stemmer."""
+    if (
+        len(token) <= 3
+        or not token.endswith("s")
+        or token in _PROTECTED_TOKENS
+        or token.endswith(("ss", "us", "is"))
+        or not token.isalpha()
+    ):
+        return token
+    if token.endswith("ies") and len(token) > 4:
+        return token[:-3] + "y"  # retries -> retry, queries -> query
+    if token.endswith(("sses", "xes")):
+        return token[:-2]  # processes -> process, indexes -> index
+    return token[:-1]  # transactions -> transaction, queues -> queue
+
+
 def _tokens(text: str) -> list[str]:
-    return re.findall(r"[a-z0-9_]+", text.lower())
+    """Lowercased word tokens with conservative plural stripping (query and documents)."""
+    return [_normalize_token(token) for token in re.findall(r"[a-z0-9_]+", text.lower())]
 
 
 def _scope_id(value: str | None) -> str:
     if not value:
         return ""
     return re.sub(r"[^a-z0-9]+", "_", value.lower()).strip("_")
+
+
+# Explicit rubric-label -> corpus competency id table. Not fuzzy: a label that is
+# not listed falls back to its slug, which only matches identically tagged chunks.
+_COMPETENCY_ALIASES: dict[str, str] = {
+    "python": "python",
+    "python_programming": "python",
+    "python_development": "python",
+    "databases": "databases",
+    "database": "databases",
+    "database_design": "databases",
+    "database_engineering": "databases",
+    "relational_databases": "databases",
+    "sql": "databases",
+    "sql_databases": "databases",
+    "distributed_systems": "distributed_systems",
+    "distributed_system": "distributed_systems",
+    "distributed_computing": "distributed_systems",
+    "machine_learning": "machine_learning",
+    "ml": "machine_learning",
+    "mlops": "machine_learning",
+    "machine_learning_engineering": "machine_learning",
+}
+# Generic suffixes campaign rubrics add to a competency name ("Python experience").
+_COMPETENCY_LABEL_SUFFIXES = ("_experience", "_skills", "_skill", "_knowledge", "_proficiency")
+# Labels meaning "no specific competency": retrieval is not competency-filtered.
+_GENERIC_COMPETENCIES = frozenset({"general", "generic", "overall"})
+
+
+def normalize_competency(label: str | None) -> str | None:
+    """Map a rubric/decision competency label to a corpus competency id.
+
+    ``None``, blank and generic labels (``general``) return ``None``, meaning no
+    competency filter. Unknown labels return their slug form.
+    """
+    slug = _scope_id(label)
+    if not slug or slug in _GENERIC_COMPETENCIES:
+        return None
+    if slug in _COMPETENCY_ALIASES:
+        return _COMPETENCY_ALIASES[slug]
+    for suffix in _COMPETENCY_LABEL_SUFFIXES:
+        if slug.endswith(suffix) and slug[: -len(suffix)] in _COMPETENCY_ALIASES:
+            return _COMPETENCY_ALIASES[slug[: -len(suffix)]]
+    return slug
+
+
+_SENIORITY_PREFIXES = frozenset(
+    {"junior", "jr", "senior", "sr", "staff", "lead", "principal"}
+)
+# Controlled role-family aliases (after seniority stripping). Only titles listed
+# here resolve to a family; any other role keeps its exact slug.
+_JOB_FAMILY_ALIASES: dict[str, str] = {
+    "software_engineer": "software_engineer",
+    "software_developer": "software_engineer",
+    "software_development_engineer": "software_engineer",
+    "backend_engineer": "software_engineer",
+    "backend_developer": "software_engineer",
+    "back_end_engineer": "software_engineer",
+    "ai_engineer": "ai_engineer",
+    "ml_engineer": "ai_engineer",
+    "machine_learning_engineer": "ai_engineer",
+    "ai_ml_engineer": "ai_engineer",
+}
+
+
+def job_scope_ids(value: str | None) -> tuple[str, ...]:
+    """Exact job slug first, then its controlled role family (if any).
+
+    Campaign scope keys (``campaign:<id>``) are never rewritten.
+    """
+    if not value or not value.strip():
+        return ()
+    if value.startswith(CAMPAIGN_SCOPE_PREFIX):
+        return (value,)
+    exact = _scope_id(value)
+    if not exact:
+        return ()
+    parts = exact.split("_")
+    while len(parts) > 1 and parts[0] in _SENIORITY_PREFIXES:
+        parts = parts[1:]
+    family = _JOB_FAMILY_ALIASES.get("_".join(parts))
+    if family is None or family == exact:
+        return (exact,)
+    return (exact, family)
+
+
+def _job_aliases(job_id: str | None, position: str | None, scope_id: str) -> tuple[str, ...]:
+    """Role-family ids for the filter, excluding the exact scope id itself."""
+    aliases: list[str] = []
+    for value in (job_id, position):
+        if value and not value.startswith(CAMPAIGN_SCOPE_PREFIX):
+            aliases.extend(
+                alias for alias in job_scope_ids(value)[1:] if alias != scope_id
+            )
+    return tuple(dict.fromkeys(aliases))
 
 
 def _cosine(left: list[float], right: list[float]) -> float:
@@ -824,10 +1086,15 @@ def _matches(document: DocumentChunk, filters: RetrievalFilters) -> bool:
         or (filters.include_global and _is_verified_global(document))
     ):
         return False
+    # Same semantics as SQLAlchemyVectorStore._filtered_query: a chunk without a
+    # competency is generic and matches any competency filter.
+    expected_competency = normalize_competency(filters.competency)
+    if expected_competency is not None and document.competency is not None:
+        if normalize_competency(document.competency) not in (None, expected_competency):
+            return False
     return all(
         expected is None or actual == expected
         for actual, expected in (
-            (document.competency, filters.competency),
             (document.source_type, filters.source_type),
             (document.version, filters.version),
             (document.language, filters.language),
@@ -856,9 +1123,10 @@ def _chunk_identity(
 
 
 def _matches_job_scope(document: DocumentChunk, filters: RetrievalFilters) -> bool:
-    if filters.job_id is not None:
+    allowed_job_ids = filters.allowed_job_ids()
+    if allowed_job_ids:
         actual_job_id = document.job_id or (_scope_id(document.job_role) or None)
-        return actual_job_id is None or actual_job_id == filters.job_id
+        return actual_job_id is None or actual_job_id in allowed_job_ids
     if filters.job_role is not None:
         actual_job_id = _scope_id(document.job_id or document.job_role) or None
         return (

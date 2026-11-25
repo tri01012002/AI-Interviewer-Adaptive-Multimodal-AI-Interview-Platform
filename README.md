@@ -20,7 +20,7 @@ Transform recruitment with AI-powered adaptive interviews that automatically adj
 
 ### 🎤 Multimodal Input/Output
 - **Text Mode** - Chat-based asynchronous interviews
-- **Voice Mode** - Real-time speech with STT/TTS
+- **Voice Mode** - Utterance-buffered voice over WebSocket (fake STT/TTS by default; real AssemblyAI/ElevenLabs clients exist but are not verified against live providers)
 - **Video Mode** - Webcam-based interviews (coming soon)
 - Same core agent, different interfaces
 
@@ -239,22 +239,19 @@ ai-interviewer/
 - **Pydantic** - Data validation & settings
 - **SQLAlchemy** - Database ORM
 
-### AI/ML
-- **OpenAI / Anthropic** - LLM providers
-- **Whisper** - Speech-to-text
-- **ElevenLabs** - Text-to-speech
-- **Cohere / LangChain** - RAG & retrieval
+### AI/ML (what the code actually runs)
+- **LLM**: OpenAI chat-completions via an httpx provider (`integrations/llm_providers/provider.py`); `LLM_PROVIDER=none` (deterministic) is the default. Anthropic settings exist but there is **no** Anthropic runtime provider.
+- **Speech**: fake STT/TTS by default; AssemblyAI (STT) and ElevenLabs (TTS) clients exist but are **not verified** against the live services. Whisper is not implemented.
+- **RAG**: BM25 lexical retrieval with optional OpenAI embeddings (exact cosine over JSON-stored vectors) and a deterministic term-coverage reranker (`rag/service.py`). No vector database, no cross-encoder/ColBERT reranker.
 
-### Database
-- **Supabase** - PostgreSQL + pgvector (Auth, DB, Storage)
-- **Redis** - Caching & task queue
-- **Celery** - Background job processing
+### Data and infrastructure
+- **PostgreSQL** (production target; SQLite for local/offline tests). No pgvector column is used.
+- **Redis**: distributed lock for interview turns (required for answer processing).
+- **Background work**: a database-polling worker (`python -m services.recruitment_campaign_worker`) with leased claims, lease renewal and stale-result fencing. Not Celery. Delivery is at-least-once processing with fencing, not exactly-once.
 
 ### Observability
-- **LangWatch** - LLM observability
-- **Sentry** - Error tracking
-- **Prometheus** - Metrics
-- **DataDog** - APM (optional)
+- JSON structured logs (`utils/logger.py`) and `/health`, `/health/live`, `/health/ready` (DB + Redis).
+- Sentry, Prometheus, Grafana, DataDog and LangWatch are **not** integrated (dependencies may be listed but are not wired).
 
 ### Frontend
 - **React** - UI framework
@@ -373,20 +370,10 @@ LAUNCH_DARKLY_KEY=...
 docker-compose up -d
 ```
 
-### Kubernetes (Production)
+### Production
 
-```bash
-# Build images
-docker build -t ai-interviewer:latest .
-
-# Deploy
-kubectl apply -f kubernetes/
-
-# Monitor
-kubectl logs -f deployment/api-deployment
-```
-
-See [DEPLOYMENT.md](docs/DEPLOYMENT.md) for full guide.
+There are **no Kubernetes manifests** in this repository and no verified production deployment.
+See [docs/PRODUCTION_READINESS.md](docs/PRODUCTION_READINESS.md) for what is verified and what still blocks production.
 
 ---
 

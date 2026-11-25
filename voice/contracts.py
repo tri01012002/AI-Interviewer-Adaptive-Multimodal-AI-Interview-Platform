@@ -28,6 +28,10 @@ class VoiceErrorCode(StrEnum):
     TTS_RATE_LIMITED = "TTS_RATE_LIMITED"
     PROTOCOL_ERROR = "VOICE_PROTOCOL_ERROR"
     SESSION_ERROR = "VOICE_SESSION_ERROR"
+    # Retryable: the server's bounded answer-processing capacity is exhausted.
+    BUSY = "VOICE_BUSY"
+    # The session already has an answer in flight; per-session turns are ordered.
+    TURN_IN_PROGRESS = "VOICE_TURN_IN_PROGRESS"
 
 class ClientVoiceEvent(BaseModel):
     type: VoiceEventType
@@ -55,6 +59,7 @@ class VoiceServerEvent(BaseModel):
     provider: str | None = None
     model: str | None = None
     confidence: float | None = None
+    retryable: bool | None = None
 
 class STTEvent(BaseModel):
     utterance_id: str

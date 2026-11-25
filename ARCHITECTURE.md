@@ -2,6 +2,20 @@
 
 **Complete technical architecture guide for AI Interviewer platform**
 
+> **Implementation status (2026-11-24).** Large parts of this document describe the *target* design, not the code.
+> Verified current behavior is in [docs/PRODUCTION_READINESS.md](docs/PRODUCTION_READINESS.md). Known differences:
+>
+> | This document says | The code actually does |
+> |---|---|
+> | Supabase / pgvector `vector(1536)` store, `SupabaseVectorStore` | No vector database. Embeddings (only when `EMBEDDING_PROVIDER=openai`) are stored as JSON text in `rag_documents` and scored by exact cosine in Python. Default is lexical BM25 only. |
+> | Cross-encoder or ColBERT reranking | `DeterministicReranker` (term coverage + prior score) in `rag/service.py`. |
+> | Whisper STT, real-time streaming speech | Fake STT/TTS by default. AssemblyAI (utterance-buffered HTTP) and ElevenLabs clients exist but are not verified against live providers. No Whisper. |
+> | Celery workers | A database-polling worker (`services/recruitment_campaign_worker.py`) with leased claims, lease renewal and token fencing. |
+> | Sentry, Prometheus, Grafana, DataDog, LangWatch | Not integrated. JSON logs, request IDs and `/health/ready` only. |
+> | Kubernetes deployment | No manifests in the repository. |
+> | Exactly-once processing | At-least-once processing with stale-result fencing; ambiguous e-mail outcomes go to manual reconciliation. Not exactly-once. |
+> | Anthropic LLM provider | Settings only; the runtime provider is OpenAI (or `none`/`mock`). |
+
 ---
 
 ## Table of Contents

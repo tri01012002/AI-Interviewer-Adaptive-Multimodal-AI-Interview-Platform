@@ -235,10 +235,17 @@ def test_expired_execution_lease_is_reclaimed_and_stale_worker_cannot_commit(
             RecruitmentCampaignRecord, campaign_id
         ).plan_version
 
-    # The first worker's provider call outlives its lease (no lease renewal
-    # exists); the second worker reclaims once the lease has expired.
+    # The first worker's provider call outlives its lease and its renewals
+    # stop (simulated partition); the second worker reclaims after expiry.
     stale, fresh = run_workers(
-        ("run_execution", {"execution_id": execution_id, "llm_delay": SHORT_LEASE_SECONDS + 4}),
+        (
+            "run_execution",
+            {
+                "execution_id": execution_id,
+                "llm_delay": SHORT_LEASE_SECONDS + 4,
+                "disable_lease_renewal": True,
+            },
+        ),
         after(("run_execution", {"execution_id": execution_id}), SHORT_LEASE_SECONDS + 1),
     )
 
@@ -251,7 +258,7 @@ def test_expired_execution_lease_is_reclaimed_and_stale_worker_cannot_commit(
         ).scalar_one()
         campaign = session.get(RecruitmentCampaignRecord, campaign_id)
     calls = side_effects("llm_job_design", brief)
-    # Duplicate provider work is expected without lease renewal, but only the
+    # Duplicate provider work is expected once renewal stops, but only the
     # reclaiming worker's result is committed.
     assert calls == [stale["pid"], fresh["pid"]]
     assert execution.attempt_count == 2 and step.attempt_count == 2
@@ -365,7 +372,14 @@ def test_delivery_slower_than_lease_is_not_resent_and_stale_result_is_discarded(
     communication_id = approve_communication(client, tenant, application_id, "pg-slow-1")
 
     slow, sweeper = run_workers(
-        ("deliver", {"communication_id": communication_id, "delay": SHORT_LEASE_SECONDS + 3}),
+        (
+            "deliver",
+            {
+                "communication_id": communication_id,
+                "delay": SHORT_LEASE_SECONDS + 3,
+                "disable_lease_renewal": True,
+            },
+        ),
         after(("discover_and_deliver", {}), SHORT_LEASE_SECONDS + 1),
     )
 

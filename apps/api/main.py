@@ -2,6 +2,8 @@
 AI Interviewer - Main FastAPI Application
 """
 
+import hmac
+import time
 from contextlib import asynccontextmanager
 from datetime import datetime
 
@@ -10,15 +12,16 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from starlette.requests import Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
+from apps.api.middleware.request_context import REQUEST_ID_HEADER, RequestContextMiddleware
 from config import settings
 from infrastructure.redis_store import RedisClient
 from services.database import init_db
 from services.support_access_audit import audit_platform_support_access
 from services.user_store import UserStore
-from utils import get_logger, setup_logging
+from utils import get_logger, metrics, setup_logging
 
 # Initialize logging
 setup_logging()
@@ -104,6 +107,7 @@ app.add_middleware(
     allow_credentials=settings.CORS_ALLOW_CREDENTIALS,
     allow_methods=settings.CORS_ALLOW_METHODS,
     allow_headers=settings.CORS_ALLOW_HEADERS,
+    expose_headers=[REQUEST_ID_HEADER, "Retry-After"],
 )
 
 # Gzip compression
@@ -113,6 +117,11 @@ app.add_middleware(GZipMiddleware, minimum_size=1000)
 @app.middleware("http")
 async def platform_support_audit_middleware(request: Request, call_next):
     return await audit_platform_support_access(request, call_next)
+
+
+# Request correlation IDs. Added last so it is the outermost user middleware:
+# CORS, gzip, the support-access audit and every route log with request_id.
+app.add_middleware(RequestContextMiddleware)
 
 # ==========================================
 # Exception Handlers
@@ -159,6 +168,7 @@ async def health_ready():
     ready = True
     checks: dict[str, bool | str] = {"database": True, "redis": True}
     engine = None
+    database_started = time.perf_counter()
     try:
         from sqlalchemy import create_engine, text
         engine = create_engine(settings.DATABASE_URL, pool_pre_ping=True)
@@ -183,7 +193,10 @@ async def health_ready():
                     extra={"failure_type": type(exc).__name__},
                 )
 
+    _record_dependency("database", bool(checks["database"]), database_started)
+
     client = None
+    redis_started = time.perf_counter()
     try:
         import redis
 
@@ -211,10 +224,48 @@ async def health_ready():
                     extra={"failure_type": type(exc).__name__},
                 )
 
+    _record_dependency("redis", bool(checks["redis"]), redis_started)
+
     return JSONResponse(
         status_code=status.HTTP_200_OK if ready else status.HTTP_503_SERVICE_UNAVAILABLE,
         content={"ready": ready, "checks": checks},
     )
+
+
+def _record_dependency(dependency: str, up: bool, started: float) -> None:
+    labels = {"dependency": dependency}
+    metrics.set_gauge("dependency_up", 1.0 if up else 0.0, labels)
+    metrics.observe("dependency_check_duration_seconds", time.perf_counter() - started, labels)
+
+
+@app.get("/metrics", include_in_schema=False)
+async def metrics_endpoint(request: Request):
+    """Prometheus text exposition of the dedicated application registry.
+
+    * 404 when metrics are disabled or ``prometheus_client`` is unavailable;
+    * if ``METRICS_BEARER_TOKEN`` is set, requires ``Authorization: Bearer <token>``
+      (constant-time comparison) and answers 401 otherwise;
+    * in production without a configured token the endpoint answers 404, so
+      metrics are never exposed unauthenticated there.
+    """
+    if not metrics.metrics_enabled():
+        return JSONResponse(status_code=status.HTTP_404_NOT_FOUND, content={"detail": "Not Found"})
+    expected = settings.METRICS_BEARER_TOKEN.get_secret_value() if settings.METRICS_BEARER_TOKEN else ""
+    if not expected:
+        if settings.ENVIRONMENT == "production":
+            return JSONResponse(status_code=status.HTTP_404_NOT_FOUND, content={"detail": "Not Found"})
+    else:
+        header = request.headers.get("authorization", "")
+        scheme, _, provided = header.partition(" ")
+        if scheme.lower() != "bearer" or not hmac.compare_digest(
+            provided.strip().encode("utf-8"), expected.encode("utf-8")
+        ):
+            return JSONResponse(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                content={"detail": "Not authenticated"},
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+    return Response(content=metrics.render_latest(), media_type=metrics.CONTENT_TYPE_LATEST)
 
 
 @app.get("/readiness", tags=["Health"])

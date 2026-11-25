@@ -56,6 +56,16 @@ class CandidateCVStorage:
         return path.read_bytes()
 
     @classmethod
+    def exists(cls, storage_key: str) -> bool:
+        """Report whether a stored CV is still present (used to verify erasure)."""
+        if Path(storage_key).name != storage_key:
+            raise OSError("Invalid private CV storage key")
+        path = cls._root() / storage_key
+        if path.parent != cls._root():
+            raise OSError("Invalid private CV storage location")
+        return path.exists() or path.is_symlink()
+
+    @classmethod
     def delete(cls, storage_key: str) -> None:
         if Path(storage_key).name != storage_key:
             raise OSError("Invalid private CV storage key")

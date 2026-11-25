@@ -863,6 +863,9 @@ def test_question_retrieval_reads_persisted_vectors_and_respects_job_scope(tmp_p
     interview_service = InterviewService.__new__(InterviewService)
     interview_service.rag = service
     graph_context = interview_service._retrieve_graph_context({
+        # Interview retrieval fails closed without a tenant; approved global
+        # demo chunks remain visible to every tenant.
+        "organization_id": "org-with-no-private-documents",
         "position": "AI Engineer",
         "current_competency": "python",
         "identified_gaps": ["cancellation", "backpressure"],

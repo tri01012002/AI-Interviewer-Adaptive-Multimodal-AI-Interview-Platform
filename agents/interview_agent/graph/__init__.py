@@ -50,6 +50,10 @@ class QuestionProposal(BaseModel):
 
 class InterviewGraphState(TypedDict, total=False):
     interview_id: str
+    # Server-controlled tenant identity, copied from the persisted interview row.
+    # Retrieval nodes need it; LangGraph drops keys that are not declared here.
+    organization_id: str | None
+    campaign_id: str | None
     position: str
     turn_id: str
     candidate_answer: str
@@ -66,6 +70,8 @@ class InterviewGraphState(TypedDict, total=False):
     agent_decision: InterviewDecision
     errors: list[str]
     retrieved_context: str
+    # {document_id, chunk_id, scope} of the chunks in retrieved_context; ids only.
+    retrieved_sources: list[dict[str, str]]
     evaluation: EvaluationResult
     rubric: dict[str, Any]
     asked_questions: list[str]
@@ -76,6 +82,8 @@ class InterviewGraphState(TypedDict, total=False):
 
 
 Analyzer = Callable[[str, InterviewGraphState], AnswerAnalysis]
+# A retriever returns the formatted context; it may also expose a ``sources``
+# attribute (see rag.service.RetrievedContext) listing the chunk ids it used.
 ContextRetriever = Callable[[InterviewGraphState], str]
 logger = logging.getLogger(__name__)
 KNOWN_COMPETENCIES = {"python", "pytorch", "computer_vision", "distributed_systems", "general"}
@@ -187,6 +195,8 @@ class InterviewAgentCore:
         started_at = perf_counter()
         graph_state: InterviewGraphState = {
             "interview_id": str(state.get("interview_id", "")),
+            "organization_id": state.get("organization_id"),
+            "campaign_id": state.get("campaign_id"),
             "position": str(state.get("position", "")),
             "turn_id": turn_id,
             "candidate_answer": answer,
@@ -215,7 +225,21 @@ class InterviewAgentCore:
         proposal = result["generated_question"]
         updated = dict(state)
         updated["skills"] = result["competency_state"]
-        updated["history"] = [*state.get("history", []), {"answer": answer, "analysis": analysis.model_dump()}]
+        # Sources that informed the question generated after this answer (ids only).
+        retrieved_sources = (
+            [] if decision.action == "FINISH" else list(result.get("retrieved_sources", []))
+        )
+        updated["history"] = [
+            *state.get("history", []),
+            {
+                "answer": answer,
+                "analysis": analysis.model_dump(),
+                "turn_id": turn_id,
+                "generated_question": None if decision.action == "FINISH" else proposal.question,
+                "retrieved_sources": retrieved_sources,
+            },
+        ]
+        updated["retrieved_sources"] = retrieved_sources
         updated["current_question"] = proposal.question
         updated["question_source"] = result.get("question_source", "deterministic")
         previous_questions = list(state.get("questions_asked", []))
@@ -524,14 +548,24 @@ class InterviewAgentCore:
 
     def _retrieve_context(self, state: InterviewGraphState) -> dict[str, Any]:
         if self._context_retriever is None:
-            return {"retrieved_context": ""}
+            return {"retrieved_context": "", "retrieved_sources": []}
         try:
             retrieval_state = dict(state)
             retrieval_state["current_competency"] = state["agent_decision"].competency
-            return {"retrieved_context": self._context_retriever(retrieval_state)}
+            context = self._context_retriever(retrieval_state)
+            sources = [
+                {
+                    "document_id": str(source["document_id"]),
+                    "chunk_id": str(source["chunk_id"]),
+                    "scope": str(source["scope"]),
+                }
+                for source in getattr(context, "sources", ())
+            ]
+            return {"retrieved_context": str(context), "retrieved_sources": sources}
         except Exception as exc:
             return {
                 "retrieved_context": "",
+                "retrieved_sources": [],
                 "errors": [
                     *state.get("errors", []),
                     f"retrieval fallback: {exc.__class__.__name__}",

@@ -269,9 +269,14 @@ def test_overlapping_reservations_are_serialized_and_idempotent(client, tmp_path
                 )
             )
         ).scalars().all()
+        # Scope to this test's schedules: the database may hold conflict events
+        # from other tests (or earlier runs against the same disposable DB).
         rejected_events = session.execute(
             select(InterviewScheduleEventRecord).where(
-                InterviewScheduleEventRecord.event_type == "reservation_conflict"
+                InterviewScheduleEventRecord.event_type == "reservation_conflict",
+                InterviewScheduleEventRecord.schedule_id.in_(
+                    [first_pending["id"], second_pending["id"]]
+                ),
             )
         ).scalars().all()
     assert states.count("confirmed_internal") == 1

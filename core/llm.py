@@ -474,8 +474,7 @@ if __name__ == "__main__":
 
     print(f"Provider : {env_config.llm_provider}")
     print(f"Model    : {env_config.model}")
-    print(f"API Key  : {env_config.anthropic_api_key}")
-    print(repr(env_config.anthropic_api_key))
+    print(f"API Key  : {'configured' if env_config.anthropic_api_key else 'missing'}")
     print("ok letsgo")
 
     try:

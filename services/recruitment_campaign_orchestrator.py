@@ -55,6 +55,7 @@ from services.interview_scheduling_service import (
     InterviewScheduleTransition,
     InterviewSchedulingService,
 )
+from services.lease_renewal import LeaseRenewal
 from services.recruitment_campaign_service import RecruitmentCampaignService
 from services.tenant_authorization import TenantContext
 
@@ -979,6 +980,27 @@ class RecruitmentCampaignOrchestrator:
             RecruitmentCampaignService._assert_authorized(campaign, context)
             return cls._serialize(session, execution)
 
+    @staticmethod
+    def _renew_execution_lease(execution_id: str, lease_token: str) -> bool:
+        """Extend an unexpired lease this worker still owns; never revive one."""
+        now = datetime.now(UTC)
+        with SessionLocal.begin() as session:
+            renewed = session.execute(
+                update(RecruitmentCampaignExecutionRecord)
+                .where(
+                    RecruitmentCampaignExecutionRecord.id == execution_id,
+                    RecruitmentCampaignExecutionRecord.status == "running",
+                    RecruitmentCampaignExecutionRecord.lease_token == lease_token,
+                    RecruitmentCampaignExecutionRecord.lease_expires_at > now,
+                )
+                .values(
+                    lease_expires_at=now
+                    + timedelta(seconds=settings.CAMPAIGN_WORKER_LEASE_SECONDS),
+                )
+                .execution_options(synchronize_session=False)
+            )
+            return renewed.rowcount == 1
+
     @classmethod
     def _run(
         cls,
@@ -1228,9 +1250,16 @@ class RecruitmentCampaignOrchestrator:
 
         try:
             input_data = JobDesignInput.model_validate_json(step.input_json)
-            result = JobDesignAgent(
-                provider if provider is not None else provider_from_settings(settings)
-            ).execute(input_data)
+            # Keep the claim alive while the (possibly slow) LLM step runs. The
+            # completion below stays fenced by lease_token either way.
+            with LeaseRenewal(
+                lambda: cls._renew_execution_lease(execution_id, lease_token),
+                work_type="campaign_execution",
+                work_id=execution_id,
+            ):
+                result = JobDesignAgent(
+                    provider if provider is not None else provider_from_settings(settings)
+                ).execute(input_data)
         except ValueError:
             return cls._fail(
                 execution_id,

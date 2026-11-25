@@ -89,12 +89,18 @@ def test_submit_answer_endpoint_updates_state_and_scores(client: TestClient):
 
     assert response.status_code == 200
     payload = response.json()
-    assert payload["skills"]["general"]["score"] >= 3
-    assert payload["evaluation"]["assessment"]["competency"] == "general"
-    assert payload["overall_score"] >= 0
-    assert payload["question_source"] == "deterministic"
-    persisted = client.get(f"/api/v1/interview/{interview_id}", headers=headers)
-    assert persisted.json()["question_source"] == "deterministic"
+    # Candidates receive the allowlisted view only (Phase E contract); scoring
+    # internals are verified through the recruiter (staff) view.
+    for internal in ("skills", "evaluation", "overall_score", "question_source"):
+        assert internal not in payload
+    staff = client.get(
+        f"/api/v1/interview/{interview_id}",
+        headers=tenant_headers(tenant.recruiter_headers, tenant.organization_id),
+    ).json()
+    assert staff["skills"]["general"]["score"] >= 3
+    assert staff["evaluation"]["assessment"]["competency"] == "general"
+    assert staff["overall_score"] >= 0
+    assert staff["question_source"] == "deterministic"
 
 
 def test_duplicate_turn_id_replays_without_appending_history(client: TestClient):
@@ -110,8 +116,8 @@ def test_duplicate_turn_id_replays_without_appending_history(client: TestClient)
 
     assert first.status_code == 200
     assert second.status_code == 200
-    assert len(first.json()["history"]) == 1
-    assert second.json()["history"] == first.json()["history"]
+    assert first.json()["questions_answered"] == 1
+    assert second.json() == first.json()
 
 
 def test_adaptive_graph_result_and_answered_question_are_persisted(client: TestClient):
@@ -128,13 +134,18 @@ def test_adaptive_graph_result_and_answered_question_are_persisted(client: TestC
     )
 
     assert response.status_code == 200
-    state = response.json()
+    candidate_view = response.json()
+    assert candidate_view["current_question"] != first_question
+    state = client.get(
+        f"/api/v1/interview/{interview_id}",
+        headers=tenant_headers(tenant.recruiter_headers, tenant.organization_id),
+    ).json()
     assert state["evaluation"]["assessment"]["competency"] == "general"
     assert state["next_action"] == state["recommended_next_action"]
-    assert state["current_question"] != first_question
+    assert state["current_question"] == candidate_view["current_question"]
     persisted = client.get(f"/api/v1/interview/{interview_id}", headers=headers).json()
     assert persisted["current_question"] == state["current_question"]
-    assert persisted["evaluation"] == state["evaluation"]
+    assert "evaluation" not in persisted
 
     with SessionLocal() as session:
         turn = session.execute(

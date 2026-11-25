@@ -1,0 +1,175 @@
+{
+  "dataset_version": "retrieval-probes-v1",
+  "description": "Deterministic interview-retrieval probes built from the Phase C failure cases. Global documents come from the pinned demo corpus; tenant documents below are synthetic fixtures inserted only into a throwaway evaluation database.",
+  "k": 5,
+  "tenant_documents": [
+    {
+      "document_id": "acme-db-guidelines",
+      "chunk_id": "c0",
+      "organization_id": "org-a",
+      "competency": null,
+      "job_id": null,
+      "text": "Acme engineering guidelines: every payment transaction declares its isolation level, uses idempotent retries, and concurrency bugs are reviewed in postmortems."
+    },
+    {
+      "document_id": "acme-python-guide",
+      "chunk_id": "c0",
+      "organization_id": "org-a",
+      "competency": "python",
+      "job_id": null,
+      "text": "Acme Python services handle concurrency with asyncio, bounded worker queues, and explicit cancellation tests."
+    },
+    {
+      "document_id": "acme-campaign-only",
+      "chunk_id": "c0",
+      "organization_id": "org-a",
+      "competency": null,
+      "job_id": "campaign:probe-campaign-x",
+      "text": "Campaign-only note: transactions, concurrency, and backpressure topics for one recruitment campaign."
+    },
+    {
+      "document_id": "globex-db-guidelines",
+      "chunk_id": "c0",
+      "organization_id": "org-b",
+      "competency": null,
+      "job_id": null,
+      "text": "Globex guidelines: database transactions, retries, and concurrency reviews for every service."
+    },
+    {
+      "document_id": "globex-python-guide",
+      "chunk_id": "c0",
+      "organization_id": "org-b",
+      "competency": "python",
+      "job_id": null,
+      "text": "Globex Python concurrency guide: asyncio, queues, backpressure, and cancellation."
+    }
+  ],
+  "probes": [
+    {
+      "id": "se-databases-transactions",
+      "kind": "positive",
+      "position": "Software Engineer",
+      "competency": "databases",
+      "gaps": ["transactions"],
+      "organization_id": "org-a",
+      "relevant_document_ids": ["database-transaction-rubric", "database-isolation-knowledge", "database-competency", "acme-db-guidelines"]
+    },
+    {
+      "id": "senior-se-databases-transactions",
+      "kind": "positive",
+      "position": "Senior Software Engineer",
+      "competency": "databases",
+      "gaps": ["transactions"],
+      "organization_id": "org-a",
+      "relevant_document_ids": ["database-transaction-rubric", "database-isolation-knowledge", "database-competency", "acme-db-guidelines"]
+    },
+    {
+      "id": "se-general-concurrency",
+      "kind": "positive",
+      "position": "Software Engineer",
+      "competency": "general",
+      "gaps": ["concurrency"],
+      "organization_id": "org-a",
+      "relevant_document_ids": ["database-competency", "acme-db-guidelines", "acme-python-guide"]
+    },
+    {
+      "id": "se-python-experience-concurrency",
+      "kind": "positive",
+      "position": "Software Engineer",
+      "competency": "Python experience",
+      "gaps": ["concurrency"],
+      "organization_id": "org-a",
+      "relevant_document_ids": ["acme-python-guide"]
+    },
+    {
+      "id": "ai-python-concurrency",
+      "kind": "positive",
+      "position": "AI Engineer",
+      "competency": "python",
+      "gaps": ["concurrency"],
+      "organization_id": "org-a",
+      "relevant_document_ids": ["python-concurrency-competency", "python-concurrency-rubric", "python-async-io-knowledge", "acme-python-guide"]
+    },
+    {
+      "id": "ml-engineer-machine-learning-monitoring",
+      "kind": "positive",
+      "position": "ML Engineer",
+      "competency": "Machine learning",
+      "gaps": ["model monitoring"],
+      "organization_id": "org-a",
+      "relevant_document_ids": ["mlops-monitoring-knowledge", "mlops-deployment-rubric", "mlops-monitoring-question"]
+    },
+    {
+      "id": "backend-distributed-cache-invalidation",
+      "kind": "positive",
+      "position": "Backend Engineer",
+      "competency": "Distributed systems",
+      "gaps": ["cache invalidation"],
+      "organization_id": "org-a",
+      "relevant_document_ids": ["distributed-cache-knowledge", "distributed-cache-rubric", "cache-failure-followup", "distributed-cache-question"]
+    },
+    {
+      "id": "senior-ai-python-backpressure-org-b",
+      "kind": "positive",
+      "position": "Senior AI Engineer",
+      "competency": "Python",
+      "gaps": ["backpressure"],
+      "organization_id": "org-b",
+      "relevant_document_ids": ["python-async-io-knowledge", "python-cancellation-followup", "python-concurrency-competency", "globex-python-guide"]
+    },
+    {
+      "id": "se-sql-retries-org-b",
+      "kind": "positive",
+      "position": "Software Developer",
+      "competency": "SQL",
+      "gaps": ["retries"],
+      "organization_id": "org-b",
+      "relevant_document_ids": ["database-idempotency-followup", "database-transaction-rubric", "database-isolation-knowledge", "globex-db-guidelines"]
+    },
+    {
+      "id": "se-databases-transactions-missing-org",
+      "kind": "positive",
+      "position": "Software Engineer",
+      "competency": "databases",
+      "gaps": ["transactions"],
+      "organization_id": null,
+      "relevant_document_ids": ["database-transaction-rubric", "database-isolation-knowledge", "database-competency"]
+    },
+    {
+      "id": "product-manager-concurrency",
+      "kind": "negative",
+      "position": "Product Manager",
+      "competency": "general",
+      "gaps": ["concurrency"],
+      "organization_id": "org-a",
+      "relevant_document_ids": []
+    },
+    {
+      "id": "data-analyst-databases-transactions",
+      "kind": "negative",
+      "position": "Data Analyst",
+      "competency": "databases",
+      "gaps": ["transactions"],
+      "organization_id": "org-a",
+      "relevant_document_ids": []
+    },
+    {
+      "id": "engineering-manager-concurrency",
+      "kind": "negative",
+      "position": "Engineering Manager",
+      "competency": "general",
+      "gaps": ["concurrency"],
+      "organization_id": "org-b",
+      "relevant_document_ids": []
+    },
+    {
+      "id": "senior-product-manager-python-missing-org",
+      "kind": "negative",
+      "position": "Senior Product Manager",
+      "competency": "Python",
+      "gaps": ["concurrency"],
+      "organization_id": null,
+      "relevant_document_ids": []
+    }
+  ]
+}

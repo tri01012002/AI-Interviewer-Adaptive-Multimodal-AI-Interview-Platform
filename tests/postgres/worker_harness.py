@@ -223,6 +223,12 @@ def worker_main(task: str, kwargs: dict, barrier, results) -> None:
     try:
         kwargs = dict(kwargs)
         start_after = kwargs.pop("start_after", 0)
+        if kwargs.pop("disable_lease_renewal", False):
+            # Simulates a worker whose renewals stop reaching the database
+            # (network partition, frozen process): its lease then expires.
+            from services.lease_renewal import LeaseRenewal
+
+            LeaseRenewal._run = lambda self: None
         barrier.wait(timeout=120)
         time.sleep(start_after)
         outcome = TASKS[task](**kwargs)

@@ -22,7 +22,7 @@ pytestmark = pytest.mark.skipif(
     reason="migration verification needs a disposable PostgreSQL DATABASE_URL",
 )
 
-EXPECTED_HEAD = "g20_campaign_interview_linkage"
+EXPECTED_HEAD = "g21_candidate_legal_hold"
 REPOSITORY = Path(__file__).resolve().parents[2]
 # Tables owned by the recruitment campaign workflow: no schema drift allowed.
 CAMPAIGN_TABLE_PREFIXES = (
@@ -71,7 +71,7 @@ def test_migration_history_has_single_expected_head():
     scripts = ScriptDirectory.from_config(Config(str(REPOSITORY / "alembic.ini")))
     assert scripts.get_heads() == [EXPECTED_HEAD]
     revisions = list(scripts.walk_revisions())
-    assert len(revisions) == 19
+    assert len(revisions) == 20
     assert all(not isinstance(item.down_revision, tuple) for item in revisions)
 
 

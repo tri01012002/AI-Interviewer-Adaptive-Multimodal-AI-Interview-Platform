@@ -36,6 +36,7 @@ from services.email_provider import (
     EmailProvider,
     create_email_provider,
 )
+from services.lease_renewal import LeaseRenewal
 from services.recruitment_campaign_service import RecruitmentCampaignService
 from services.tenant_authorization import TenantContext
 
@@ -868,7 +869,14 @@ class CandidateCommunicationService:
         if not preflight_valid:
             return cls._mark_pre_delivery_revoked(communication_id, token)
         try:
-            raw_result = active_provider.deliver(request)
+            # Several SMTP phases may each take up to the SMTP timeout; keep the
+            # claim alive meanwhile. Finishing is still fenced by the token.
+            with LeaseRenewal(
+                lambda: cls._renew_delivery_lease(communication_id, token),
+                work_type="candidate_communication",
+                work_id=communication_id,
+            ):
+                raw_result = active_provider.deliver(request)
         except CommunicationDeliveryFailure as exc:
             return cls._finish_provider_failure(
                 communication_id,
@@ -1158,6 +1166,27 @@ class CandidateCommunicationService:
                 ),
             )
             return cls._serialize(session, communication)
+
+    @staticmethod
+    def _renew_delivery_lease(communication_id: str, token: str) -> bool:
+        """Extend an unexpired delivery lease this worker still owns."""
+        now = datetime.now(UTC)
+        with SessionLocal.begin() as session:
+            renewed = session.execute(
+                update(CandidateCommunicationRecord)
+                .where(
+                    CandidateCommunicationRecord.id == communication_id,
+                    CandidateCommunicationRecord.status == "sending",
+                    CandidateCommunicationRecord.lease_token == token,
+                    CandidateCommunicationRecord.lease_expires_at > now,
+                )
+                .values(
+                    lease_expires_at=now
+                    + timedelta(seconds=settings.CAMPAIGN_WORKER_LEASE_SECONDS),
+                )
+                .execution_options(synchronize_session=False)
+            )
+            return renewed.rowcount == 1
 
     @staticmethod
     def _locked_communication(session, communication_id: str, token: str, now):

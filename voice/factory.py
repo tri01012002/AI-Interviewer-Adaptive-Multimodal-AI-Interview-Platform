@@ -16,6 +16,8 @@ def create_providers() -> tuple[VADProvider, STTProvider, TTSProvider]:
         "language": settings.STT_LANGUAGE,
         "timeout_seconds": settings.STT_TIMEOUT_SECONDS,
         "max_retries": settings.STT_MAX_RETRIES,
+        "poll_interval_seconds": settings.STT_POLL_INTERVAL_SECONDS,
+        "transcript_deadline_seconds": settings.STT_TRANSCRIPT_DEADLINE_SECONDS,
     }
     stt = get_provider(settings.STT_PROVIDER, "stt", **stt_kwargs)
     

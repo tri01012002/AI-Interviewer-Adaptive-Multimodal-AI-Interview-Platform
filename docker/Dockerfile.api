@@ -16,9 +16,10 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy application code
 COPY . .
 
-# Health check
+# Health check (liveness). Uses the standard library: `requests` is not a
+# declared dependency, and urlopen raises on non-2xx so the check can fail.
 HEALTHCHECK --interval=10s --timeout=5s --retries=3 \
-    CMD python -c "import requests; requests.get('http://localhost:8000/health')"
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health/live', timeout=4)"
 
 # Run application
 CMD ["uvicorn", "apps.api.main:app", "--host", "0.0.0.0", "--port", "8000"]

@@ -44,6 +44,15 @@ jobs:
           tests/unit/test_live_provider_smoke.py
           tests/integration/test_phase115c_application_concurrency.py
           tests/integration/test_live_interview_e2e.py
+          tests/unit/test_secret_redaction.py
+          tests/unit/test_support_access_audit_coverage.py
+          tests/unit/test_tenant_interview_retrieval.py
+          tests/unit/test_stt_assemblyai_offline.py
+          tests/redis
+          tools/ci_assert_no_skips.py
+          tools/ci_check_test_coverage.py
+      - name: Every unit test file is run by a CI job
+        run: python tools/ci_check_test_coverage.py
       - name: Install timeout contract test dependencies
         run: python -m pip install pytest==7.4.3 pytest-timeout==2.3.1
       - name: Verify CI shell propagates failures
@@ -192,6 +201,8 @@ jobs:
           - database-concurrency
           - websocket-voice
           - rag
+          - campaign-workflow
+          - security-regression
         include:
           - group: fast-unit
             paths: >-
@@ -224,12 +235,48 @@ jobs:
               tests/unit/test_voice_phase10.py
               tests/unit/test_voice_session.py
               tests/unit/test_voice_websocket.py
+              tests/unit/test_voice_session_concurrency.py
+              tests/unit/test_voice_websocket_lifecycle.py
+              tests/unit/test_stt_assemblyai_offline.py
           - group: rag
             paths: >-
               tests/unit/test_rag_evaluation.py
               tests/unit/test_rag_metrics.py
               tests/unit/test_rag_retrieval.py
               tests/unit/test_rag_semantic_retrieval.py
+              tests/unit/test_rag_phase_c_quality.py
+          - group: campaign-workflow
+            paths: >-
+              tests/unit/test_recruitment_campaigns.py
+              tests/unit/test_recruitment_campaign_objectives.py
+              tests/unit/test_recruitment_campaign_orchestration.py
+              tests/unit/test_recruitment_candidate_intake.py
+              tests/unit/test_candidate_communications.py
+              tests/unit/test_candidate_availability.py
+              tests/unit/test_interview_scheduling.py
+              tests/unit/test_campaign_lifecycle.py
+              tests/unit/test_campaign_lifecycle_regressions.py
+              tests/unit/test_e2e_recruitment_journey.py
+              tests/unit/test_email_provider.py
+              tests/unit/test_email_delivery_phases.py
+              tests/unit/test_lease_renewal.py
+              tests/unit/test_legacy_tenant_crosswalk_v2.py
+              tests/unit/test_legacy_tenant_mapping_dry_run.py
+          - group: security-regression
+            paths: >-
+              tests/unit/test_secret_redaction.py
+              tests/unit/test_support_access_audit_coverage.py
+              tests/unit/test_tenant_interview_retrieval.py
+              tests/unit/test_stt_assemblyai_offline.py
+              tests/unit/test_audit_transactions.py
+              tests/unit/test_candidate_invitations.py
+              tests/unit/test_candidate_data_deletion.py
+              tests/unit/test_request_context_and_rate_limits.py
+              tests/unit/test_observability_metrics.py
+              tests/unit/test_candidate_report_export_erasure.py
+              tests/unit/test_interview_source_visibility.py
+              tests/unit/test_retention_policy.py
+              tests/unit/test_provider_smoke_harness.py
     services:
       redis:
         image: redis:7-alpine
@@ -298,6 +345,153 @@ jobs:
           --timeout-method=signal
           -ra
           --durations=20
+
+  postgres-integration:
+    name: PostgreSQL 16 + Redis 7 integration
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: ci-disposable-password
+          POSTGRES_DB: test_ci
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+        ports:
+          - 5432:5432
+      redis:
+        image: redis:7-alpine
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+        ports:
+          - 6379:6379
+    env:
+      # Disposable service-container database. tests/conftest.py also enforces a
+      # loopback host, a test_* database name and RUN_POSTGRES_TESTS=1.
+      DATABASE_URL: postgresql+psycopg2://postgres:ci-disposable-password@127.0.0.1:5432/test_ci
+      RUN_POSTGRES_TESTS: "1"
+      REDIS_URL: redis://127.0.0.1:6379/0
+      ENVIRONMENT: test
+      ENABLE_DEV_ADMIN_BOOTSTRAP: "false"
+      LLM_PROVIDER: none
+      EMBEDDING_PROVIDER: none
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+      - name: Refuse non-disposable PostgreSQL targets
+        run: >-
+          python -c "import os; from sqlalchemy.engine import make_url;
+          u = make_url(os.environ['DATABASE_URL']);
+          assert u.drivername.startswith('postgresql'), 'PostgreSQL URL required';
+          assert u.host in {'127.0.0.1', 'localhost'}, 'loopback service container only';
+          assert (u.database or '').startswith('test_'), 'database name must start with test_';
+          print('Disposable PostgreSQL target confirmed.')"
+      - name: Verify single migration head
+        run: |
+          heads="$(python -m alembic heads | grep -c '(head)')"
+          if [[ "$heads" -ne 1 ]]; then
+            python -m alembic heads
+            echo "Expected exactly one Alembic head, found $heads"
+            exit 1
+          fi
+      - name: Migrate empty database to head
+        run: |
+          python -m alembic upgrade head
+          python -m alembic current | grep -q '(head)'
+      - name: PostgreSQL migration and multi-worker suites
+        run: >-
+          python -m pytest tests/postgres
+          -m "not live" --timeout=300 -ra
+          --junitxml=postgres-suite.xml
+      - name: Fail if PostgreSQL suites skipped
+        run: python tools/ci_assert_no_skips.py postgres-suite.xml --min-tests 10
+      - name: Business workflows on PostgreSQL
+        run: >-
+          python -m pytest
+          tests/unit/test_recruitment_campaigns.py
+          tests/unit/test_recruitment_campaign_objectives.py
+          tests/unit/test_recruitment_campaign_orchestration.py
+          tests/unit/test_campaign_lifecycle.py
+          tests/unit/test_campaign_lifecycle_regressions.py
+          tests/unit/test_e2e_recruitment_journey.py
+          tests/unit/test_recruitment_candidate_intake.py
+          tests/unit/test_candidate_communications.py
+          tests/unit/test_candidate_availability.py
+          tests/unit/test_interview_scheduling.py
+          tests/unit/test_resource_authorization.py
+          tests/unit/test_support_access_audit_coverage.py
+          tests/unit/test_tenant_interview_retrieval.py
+          tests/unit/test_api_interview.py
+          tests/unit/test_interview_hardening.py
+          tests/unit/test_audit_transactions.py
+          tests/unit/test_database_integrity.py
+          tests/unit/test_candidate_data_deletion.py
+          tests/unit/test_candidate_report_export_erasure.py
+          tests/unit/test_retention_policy.py
+          tests/unit/test_interview_source_visibility.py
+          -m "not live" --timeout=300 -ra
+          --junitxml=postgres-workflows.xml
+      - name: Fail if workflow tests skipped on PostgreSQL
+        run: python tools/ci_assert_no_skips.py postgres-workflows.xml --min-tests 50
+
+  redis-integration:
+    name: Real Redis 7 integration
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      redis:
+        image: redis:7-alpine
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+        ports:
+          - 6379:6379
+    env:
+      DATABASE_URL: sqlite:///./storage/ci_redis_${{ github.run_id }}.db
+      REDIS_URL: redis://127.0.0.1:6379/0
+      REDIS_INTEGRATION_URL: redis://127.0.0.1:6379/1
+      ENVIRONMENT: test
+      ENABLE_DEV_ADMIN_BOOTSTRAP: "false"
+      LLM_PROVIDER: none
+      EMBEDDING_PROVIDER: none
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+      - name: Prepare isolated SQLite database
+        run: |
+          mkdir -p storage
+          python -m alembic upgrade head
+      - name: Real Redis lock and interview-turn suites
+        run: >-
+          python -m pytest tests/redis tests/isolated/test_distributed_lock_verification.py
+          --timeout=120 -ra
+          --junitxml=redis-suite.xml
+      - name: Fail if Redis suites skipped
+        run: python tools/ci_assert_no_skips.py redis-suite.xml --min-tests 10
 
   live-provider:
     name: Optional live AI verification

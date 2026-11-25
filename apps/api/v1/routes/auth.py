@@ -5,6 +5,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 
+from apps.api.middleware.rate_limit import login_rate_limit
 from services.auth_service import authenticate_user, get_current_user, issue_token, register_user, security
 
 router = APIRouter()
@@ -29,7 +30,7 @@ async def register(payload: RegisterRequest):
     return {"message": "User registered successfully", "user": {"email": user["email"], "role": user["role"]}}
 
 
-@router.post("/auth/login", tags=["Auth"])
+@router.post("/auth/login", tags=["Auth"], dependencies=[Depends(login_rate_limit)])
 async def login(payload: LoginRequest):
     if not payload.email or "@" not in payload.email:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Email is required")

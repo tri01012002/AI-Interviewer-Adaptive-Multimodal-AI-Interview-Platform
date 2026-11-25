@@ -74,6 +74,10 @@ class InterviewEvaluationError(RuntimeError):
     """Raised when an answer cannot be evaluated and should be retried."""
 
 
+class InterviewContextUnavailableError(RuntimeError):
+    """Raised when tenant-scoped retrieval cannot run safely for an interview."""
+
+
 class InterviewService:
     """Coordinates interview decisions and persistence within explicit transactions."""
 
@@ -632,7 +636,10 @@ class InterviewService:
                     asked_questions=graph_state["questions_asked"],
                 )
                 updated_state["follow_up_questions"] = self.rag.retrieve_relevant_questions(
-                    updated_state.get("position", ""), updated_state.get("skills", {})
+                    updated_state.get("position", ""),
+                    updated_state.get("skills", {}),
+                    organization_id=state["organization_id"],
+                    campaign_id=state.get("campaign_id"),
                 )
                 evaluation = self.evaluator.summarize(
                     result,
@@ -663,6 +670,13 @@ class InterviewService:
             raise
 
     def _retrieve_graph_context(self, state: dict[str, Any]) -> str:
+        organization_id = state.get("organization_id")
+        if not isinstance(organization_id, str) or not organization_id.strip():
+            # Fail closed: never run interview retrieval without a tenant. The graph
+            # catches this and continues without retrieved context.
+            raise InterviewContextUnavailableError(
+                "Interview context retrieval requires a tenant"
+            )
         result = self.rag.retrieve_context(
             str(state.get("position", "")),
             state.get("current_competency"),
@@ -672,15 +686,20 @@ class InterviewService:
             previous_questions=state.get("asked_questions", []),
             difficulty=state.get("difficulty"),
             job_id=state.get("job_id") or state.get("interview_template_id"),
-            organization_id=state.get("organization_id"),
+            organization_id=organization_id,
+            campaign_id=state.get("campaign_id"),
         )
         if result.fallback_reason and result.fallback_reason.startswith("retrieval_failed:"):
             raise RuntimeError("Interview question context retrieval failed")
-        return self.rag.format_context(result)
+        # The returned text carries the {document_id, chunk_id, scope} of the chunks
+        # it includes, restricted to this tenant and the approved global corpus; the
+        # graph persists them on the turn's history entry for evidence tracing.
+        return self.rag.format_context_with_sources(result, organization_id)
 
     @staticmethod
     def _state(interview: Any) -> dict[str, Any]:
         state = json.loads(interview.state_json)
+        # Identity fields always come from the persisted row, never from state_json.
         state.update({
             "interview_id": interview.id,
             "candidate_id": interview.candidate_id,
@@ -689,4 +708,9 @@ class InterviewService:
             "mode": interview.mode,
             "current_question": interview.current_question,
         })
+        if interview.campaign_id is None:
+            # Non-campaign interview: drop any campaign_id smuggled into state_json.
+            state.pop("campaign_id", None)
+        else:
+            state["campaign_id"] = interview.campaign_id
         return state

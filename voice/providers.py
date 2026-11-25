@@ -11,6 +11,9 @@ class STTProvider(Protocol):
     async def start_session(self, utterance_id: str, audio_format: AudioFormat) -> None: ...
     async def send_audio(self, utterance_id: str, audio: bytes) -> AsyncIterator[STTEvent]: ...
     async def end_utterance(self, utterance_id: str) -> AsyncIterator[STTEvent]: ...
+    # Optional: release provider-side audio for an utterance. Must be safe to
+    # call repeatedly and for unknown ids. Callers use getattr() to detect it.
+    async def cancel_utterance(self, utterance_id: str) -> None: ...
     async def close(self) -> None: ...
 
 class TTSProvider(Protocol):
@@ -61,7 +64,12 @@ class FakeSTTProvider:
         yield STTEvent(utterance_id=utterance_id, text="I used Python", is_final=False)
 
     async def end_utterance(self, utterance_id: str) -> AsyncIterator[STTEvent]:
+        # The utterance's audio is consumed by finalization; never keep it.
+        self.audio.pop(utterance_id, None)
         yield STTEvent(utterance_id=utterance_id, text=self.final_text, is_final=True)
+
+    async def cancel_utterance(self, utterance_id: str) -> None:
+        self.audio.pop(utterance_id, None)
 
     async def close(self) -> None:
         self.audio.clear()

@@ -172,8 +172,14 @@ class SmtpEmailProvider:
         return None
 
     def _submit_message(self, client, message: EmailMessage):
+        # Phase matters: MAIL FROM / RCPT rejections happen before DATA, so the
+        # message was provably not accepted. Anything else raised while sending
+        # (timeout, disconnect, OSError) may have happened after the server
+        # accepted DATA, so it is "unknown" and must never be retried blindly.
         try:
             return client.send_message(message)
+        except smtplib.SMTPSenderRefused as exc:
+            return self._sender_refusal_result(exc.smtp_code)
         except smtplib.SMTPDataError as exc:
             return self._data_error_result(exc.smtp_code)
         except smtplib.SMTPRecipientsRefused as exc:
@@ -203,6 +209,16 @@ class SmtpEmailProvider:
             error_class="recipient_refused",
             idempotency_supported=False,
             safe_metadata={"refused_recipient_count": len(refusals)},
+        )
+
+    @staticmethod
+    def _sender_refusal_result(code: int) -> EmailDeliveryResult:
+        temporary = 400 <= code < 500
+        return EmailDeliveryResult(
+            outcome="retryable_not_accepted" if temporary else "definitively_rejected",
+            provider_name="smtp",
+            error_class="sender_refused_temporary" if temporary else "sender_refused",
+            idempotency_supported=False,
         )
 
     @staticmethod

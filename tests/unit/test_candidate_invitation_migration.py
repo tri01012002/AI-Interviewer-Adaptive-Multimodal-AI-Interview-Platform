@@ -134,7 +134,7 @@ def test_candidate_invitation_migration_preserves_legacy_profiles(monkeypatch):
         )
         assert verified_at is None
         assert invitation_count == 0
-        assert revision == "g20_campaign_interview_linkage"
+        assert revision == "g21_candidate_legal_hold"
         version_column = next(
             column
             for column in inspect(engine).get_columns("alembic_version")

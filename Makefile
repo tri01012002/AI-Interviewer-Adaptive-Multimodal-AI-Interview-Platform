@@ -19,7 +19,6 @@ help: ## Show this help message
 install: ## Install dependencies
 	@echo "$(BLUE)Installing dependencies...$(NC)"
 	pip install -r requirements.txt
-	pip install -r requirements-dev.txt
 
 install-pre-commit: ## Setup pre-commit hooks
 	@echo "$(BLUE)Setting up pre-commit hooks...$(NC)"
@@ -53,9 +52,9 @@ run-web: ## Run React frontend
 	@echo "$(BLUE)Starting React server...$(NC)"
 	cd apps/web && npm start
 
-run-worker: ## Run Celery worker
-	@echo "$(BLUE)Starting Celery worker...$(NC)"
-	celery -A apps.worker.celery_app worker --loglevel=info
+run-worker: ## Run the database-polling recruitment campaign worker
+	@echo "$(BLUE)Starting recruitment campaign worker...$(NC)"
+	python -m services.recruitment_campaign_worker run
 
 run-eval: ## Run evaluation framework
 	@echo "$(BLUE)Starting evaluation runner...$(NC)"
@@ -76,14 +75,14 @@ db-migrate: ## Run database migrations
 
 db-seed: ## Seed database with sample data
 	@echo "$(BLUE)Seeding database...$(NC)"
-	python -m integrations.supabase.seeds
+	@echo "No seed module exists (integrations.supabase.seeds was never implemented)." && exit 1
 	@echo "$(GREEN)✓ Database seeded$(NC)"
 
 db-reset: ## Reset database (drop and recreate)
 	@echo "$(RED)⚠ Resetting database...$(NC)"
 	alembic downgrade base
 	alembic upgrade head
-	python -m integrations.supabase.seeds
+	@echo "No seed module exists (integrations.supabase.seeds was never implemented)." && exit 1
 	@echo "$(GREEN)✓ Database reset completed$(NC)"
 
 db-shell: ## Connect to PostgreSQL shell
@@ -186,8 +185,8 @@ docker-logs: ## Show Docker logs
 docker-logs-api: ## Show API logs
 	docker-compose logs -f api
 
-docker-logs-worker: ## Show Celery worker logs
-	docker-compose logs -f celery_worker
+docker-logs-worker: ## Show recruitment campaign worker logs
+	docker-compose logs -f recruitment_campaign_worker
 
 docker-clean: ## Remove Docker volumes and images
 	@echo "$(RED)⚠ Removing Docker volumes...$(NC)"

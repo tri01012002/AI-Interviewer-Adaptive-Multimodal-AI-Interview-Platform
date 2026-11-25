@@ -4,6 +4,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
 
+from apps.api.middleware.rate_limit import cv_upload_rate_limit
 from config import settings
 from services.candidate_application_service import (
     ApplicationResponse,
@@ -272,6 +273,7 @@ async def resume_campaign_execution(
     "/recruitment-campaigns/{campaign_id}/applications/cv",
     response_model=ApplicationResponse,
     status_code=status.HTTP_202_ACCEPTED,
+    dependencies=[Depends(cv_upload_rate_limit)],
 )
 async def submit_candidate_cv(
     campaign_id: str,

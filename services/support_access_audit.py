@@ -21,13 +21,24 @@ from utils import get_logger
 
 logger = get_logger(__name__)
 
-_AUDITED_PREFIXES = (
-    "/api/v1/candidates",
-    "/api/v1/candidate-invitations",
-    "/api/v1/recruitment-campaigns",
-    "/api/v1/recruitment-campaign-executions",
-    "/api/v1/interview",
-    "/api/v1/interviews",
+# Path collection -> audit resource type for every tenant-scoped resource family.
+# Order matters for nested paths: the first collection present in the path wins,
+# so ``/recruitment-campaigns/{id}/applications/...`` stays a campaign resource.
+_AUDITED_COLLECTIONS = (
+    ("interview", "interview"),
+    ("interviews", "interview"),
+    ("candidates", "candidate"),
+    ("candidate-invitations", "candidate_invitation"),
+    ("recruitment-campaigns", "recruitment_campaign"),
+    ("recruitment-campaign-executions", "recruitment_campaign_execution"),
+    ("recruitment-applications", "recruitment_application"),
+    ("candidate-communications", "candidate_communication"),
+    ("candidate-availability-requests", "candidate_availability_request"),
+    ("interview-schedules", "interview_schedule"),
+)
+
+_AUDITED_PREFIXES = tuple(
+    f"/api/v1/{collection}" for collection, _ in _AUDITED_COLLECTIONS
 )
 
 
@@ -198,14 +209,7 @@ def _support_action(path: str, resource_type: str) -> str:
 
 def _resource_from_path(path: str) -> tuple[str, str]:
     parts = [part for part in path.split("/") if part]
-    for collection, resource_type in (
-        ("interview", "interview"),
-        ("interviews", "interview"),
-        ("candidates", "candidate"),
-        ("candidate-invitations", "candidate_invitation"),
-        ("recruitment-campaigns", "recruitment_campaign"),
-        ("recruitment-campaign-executions", "recruitment_campaign_execution"),
-    ):
+    for collection, resource_type in _AUDITED_COLLECTIONS:
         if collection in parts:
             index = parts.index(collection)
             resource_id = parts[index + 1][:128] if len(parts) > index + 1 else "collection"

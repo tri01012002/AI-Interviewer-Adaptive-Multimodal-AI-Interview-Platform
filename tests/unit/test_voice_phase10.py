@@ -64,7 +64,8 @@ class TestAssemblyAIProvider:
             await provider.start_session("utt_1", AudioFormat())
             large_audio = b"\x00\x01" * (121 * 16000)
             with pytest.raises(STTProviderError, match="exceeds 120 seconds"):
-                await provider.send_audio("utt_1", large_audio)
+                async for _event in provider.send_audio("utt_1", large_audio):
+                    pass
         run_test()
 
 
@@ -448,8 +449,9 @@ class TestRealProviderMocking:
         async def run_test():
             provider = AssemblyAISTTProvider(api_key="test-key")
             await provider.start_session("utt_1", AudioFormat())
-            await provider.send_audio("utt_1", b"\x00\x01" * 1000)
-            
+            async for _event in provider.send_audio("utt_1", b"\x00\x01" * 1000):
+                pass
+
             # Simply test that the provider handles audio without crashing
             # Full HTTP mocking is complex and not critical for Phase 10
             results = []

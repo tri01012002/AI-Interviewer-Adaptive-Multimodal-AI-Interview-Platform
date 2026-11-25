@@ -297,6 +297,13 @@ def _complete_candidate_interview(
         assert response.status_code == 200, response.text
         state = response.json()
     assert state["status"] == "completed"
+    # Candidate responses are an allowlist (Phase E); campaign provenance and the
+    # rubric snapshot are internal, so read them from the persisted state.
+    assert "rubric_snapshot" not in state
+    with SessionLocal() as session:
+        record = session.get(InterviewRecord, interview_id)
+        assert record is not None
+        state = {**json.loads(record.state_json), "candidate_id": record.candidate_id}
     assert state["rubric_snapshot"]
     report = ReportService().build_report(
         state["candidate_id"],
