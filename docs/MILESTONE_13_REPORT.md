@@ -1,5 +1,18 @@
 # Milestone 13 Report — Release Candidate
 
+> P14 note (2026-11-25): this is the historical P13 report. P13 was pushed
+> as `71a3314edd7962ed0f6629291b403c5e6ef2ff37`, not `4d2e7ad`. Evidence below
+> predates P14 Docker/context hardening and must not be cited as P14 CI or
+> production verification.
+>
+> P14.1 follow-up: GitHub Actions run
+> [45571865439](https://github.com/tri01012002/AI-Interviewer-Adaptive-Multimodal-AI-Interview-Platform/actions/runs/45571865439)
+> ran on that P13 baseline and failed overall on the RAG digest matrix and a
+> campaign ordering assertion. Its PostgreSQL (18 tests), Redis 7 (21 tests),
+> and quality jobs passed. P14.1 local offline verification is documented in
+> `docs/P14_1_STABILIZATION_REPORT.md`; it does not verify the current
+> uncommitted changes in GitHub Actions.
+
 **Verdict: Release Candidate for offline + PostgreSQL scope, NOT production-ready.** Real Redis, GitHub CI execution, live providers, image build and deployment are unverified; retention policy requires product-owner decisions.
 
 ## 1. Git state
@@ -39,8 +52,8 @@ Env: Python 3.11.15 venv; `ENVIRONMENT=test ENABLE_DEV_ADMIN_BOOTSTRAP=false LLM
 Order/isolation issues found and fixed during final runs: the end-to-end test assumed its CV was the next worker item (failed only in the full suite) → targeted CV step + bounded worker drain; reproduced and verified after polluting suites (37/37).
 
 ## 4. Verification status summary
-- **PostgreSQL:** VERIFIED_WITH_REAL_INFRASTRUCTURE locally (PostgreSQL 16.2). CI job not yet run.
-- **Redis:** BLOCKED. Lock primitive verified on real Redis in an earlier phase (historical PHASE_11_5B/C); interview-turn locks, rate limiting and key isolation suites unrun on real Redis.
+- **PostgreSQL:** P13 report records local PostgreSQL 16.2 verification; the later P13 baseline Actions run also passed 18 PostgreSQL tests. Neither verifies the uncommitted P14.1 changes.
+- **Redis:** P13 baseline Actions run passed 21 tests against Redis 7. P14.1 local supported-version verification remains BLOCKED; the available disposable local Redis is 3.0.504.
 - **Voice:** TESTED_OFFLINE only; providers MOCK_OR_DETERMINISTIC_ONLY.
 - **Providers (OpenAI, AssemblyAI, ElevenLabs, SMTP):** BLOCKED — no authorization; smoke tests ready.
 - **Deployment:** local process checks only; no image build, no server.
@@ -52,11 +65,11 @@ Order/isolation issues found and fixed during final runs: the end-to-end test as
 4. Whether campaign interviews may start before the scheduled slot (currently allowed).
 
 ## 6. Deployment blockers
-Real Redis verification; GitHub CI run; authorized live provider smoke tests; container image build and non-root images; production compose/orchestration (migration job, worker env); shared/object storage for multi-instance file storage; secrets management; metrics scraping/alerting backend; credential rotation decision for keys printed by the old offline config.
+P14.1 GitHub Actions verification; supported-version Redis verification on P14.1 changes; authorized live provider smoke tests; container image build and non-root runtime verification; production compose/orchestration (migration job, worker env); shared/object storage for multi-instance file storage; secrets management; metrics scraping/alerting backend; credential rotation decision for keys printed by the old offline config.
 
 ## 7. Owner actions to unblock
 1. **Real Redis locally** (authorize one): `docker run --rm -p 127.0.0.1:6379:6379 redis:7-alpine`, then `REDIS_INTEGRATION_URL=redis://127.0.0.1:6379/1 python -m pytest tests/redis tests/isolated/test_distributed_lock_verification.py -ra`.
-2. **GitHub CI**: create a branch from `main`, commit, push, open a PR; expect jobs `quality`, `test-groups` (7 groups × Python 3.11/3.12), `postgres-integration`, `redis-integration` (details in `docs/DEPLOYMENT_RUNBOOK.md` §Triggering GitHub CI).
+2. **GitHub CI**: run the workflow on the P14.1 revision after the owner authorizes publishing it; do not treat the P13 baseline run as evidence for P14.1.
 3. **Live smoke tests**: follow `docs/PROVIDER_SMOKE_RUNBOOK.md` with spend caps and test accounts.
 
 ## 8. Next milestone

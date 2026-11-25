@@ -3,10 +3,15 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+RUN groupadd --gid 10001 appgroup \
+    && useradd --uid 10001 --gid appgroup --create-home --shell /usr/sbin/nologin appuser
+
 # Install system dependencies
-RUN apt-get update && apt-get install -y \
-    gcc \
-    postgresql-client \
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends gcc postgresql-client \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Python dependencies
@@ -15,6 +20,11 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy application code
 COPY . .
+
+RUN mkdir -p /app/storage/private_cv \
+    && chown -R appuser:appgroup /app/storage
+
+USER appuser
 
 # Run the database-polled recruitment campaign worker
 CMD ["python", "-m", "services.recruitment_campaign_worker", "run"]

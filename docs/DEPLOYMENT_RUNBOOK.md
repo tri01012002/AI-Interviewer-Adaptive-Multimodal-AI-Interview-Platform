@@ -76,11 +76,14 @@ docker build -f docker/Dockerfile.worker -t <registry>/ai-interviewer-worker:<gi
 
 Tag images with the commit SHA, not `latest`. Before building for production:
 
-* add a `.dockerignore` (there is none today) excluding at least `.env`,
-  `storage/`, `.git/`, virtualenvs and `node_modules/` - otherwise `COPY . .`
-  copies local secrets and candidate files into the image;
-* the images run as root; add a non-root `USER` and give it write access only
-  to the storage mounts.
+* `.dockerignore` is present and excludes `.env` except `.env.example`, local
+  databases/logs, `storage/`, `.git/`, virtual environments and
+  `node_modules/`;
+* both API and worker Dockerfiles run as an application UID/GID and create
+  writable `/app/storage/private_cv`; `/app/storage` must remain writable by
+  UID 10001 when mounted as external storage;
+* image build and image-inspection evidence is pending because Docker Desktop
+  has no running daemon in this environment.
 
 `docker-compose.yml` is a **development** stack (bind mount `.:/app`,
 `--reload`, hard-coded dev DB password, `pgvector/pgvector:pg15` while CI tests
@@ -376,9 +379,23 @@ Not verified: container images, `docker compose`, real Redis, TLS, multiple
 API instances, shared storage, restore of file storage, provider calls,
 behavior under load.
 
-## 16. Known deployment gaps
+### P14.1 verification update
 
-* No `.dockerignore`; images run as root (section 4).
+The later offline P14.1 unit run completed with 600 passed and 4 deselected
+using the project virtualenv and a disposable SQLite database. This does not
+supersede the infrastructure gaps above. The available local Redis was
+3.0.504, below the integration suite's Redis 6+ requirement. The P13 baseline
+Actions run passed its PostgreSQL and Redis 7 jobs but failed overall; it does
+not verify the uncommitted P14.1 changes. Docker remains unavailable, so no
+image build or inspection was completed. See
+[`P14_1_STABILIZATION_REPORT.md`](./P14_1_STABILIZATION_REPORT.md) for exact
+commands and results.
+
+## 16. Known deployment gaps (P14.1)
+
+* `.dockerignore` is now present and both Dockerfiles configure UID/GID 10001,
+  but image builds, image contents, runtime user and storage permissions have
+  not been verified because Docker is unavailable.
 * `docker-compose.yml` is dev-only: no migration service, worker lacks
   `REDIS_URL`/`ENVIRONMENT`/provider settings, optional profiles reference
   missing files (`docker/prometheus.yml`, `apps/web/Dockerfile`).

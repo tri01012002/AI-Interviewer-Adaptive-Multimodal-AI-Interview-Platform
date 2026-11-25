@@ -822,6 +822,22 @@ def test_global_demo_corpus_must_match_the_pinned_digest(tmp_path, monkeypatch):
         corpus_loader.load_demo_corpus(altered_path)
 
 
+def test_approved_demo_corpus_digest_is_stable_across_checkout_newlines(
+    tmp_path, monkeypatch
+):
+    from rag import corpus_loader
+
+    canonical_content = corpus_loader.DEMO_CORPUS_PATH.read_bytes().replace(
+        b"\r\n", b"\n"
+    )
+    for name, newline in (("lf", b"\n"), ("crlf", b"\r\n")):
+        corpus_path = tmp_path / f"demo_{name}.json"
+        corpus_path.write_bytes(canonical_content.replace(b"\n", newline))
+        monkeypatch.setattr(corpus_loader, "DEMO_CORPUS_PATH", corpus_path)
+
+        assert len(corpus_loader.load_demo_corpus(corpus_path)) >= 15
+
+
 def test_question_retrieval_reads_persisted_vectors_and_respects_job_scope(tmp_path):
     engine, _, store = _vector_store(tmp_path)
     provider = FakeSemanticEmbedding()

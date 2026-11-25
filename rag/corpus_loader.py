@@ -12,7 +12,7 @@ from rag.service import DEMO_CORPUS_GLOBAL_APPROVAL_REFERENCE, DocumentChunk
 
 DEMO_CORPUS_PATH = Path(__file__).resolve().parent / "corpus" / "demo_v1.json"
 DEMO_CORPUS_APPROVED_SHA256 = (
-    "46706d61232929b75252b27768e3895dc5b31f5296f938985bd0409ee5e45282"
+    "731add0bba80fc312dd327b40ba45a370e1d77fe182283a817fad6790e82ded4"
 )
 
 
@@ -39,7 +39,8 @@ def load_demo_corpus(path: Path = DEMO_CORPUS_PATH) -> list[DocumentChunk]:
             raise ValueError(
                 "global scope is permitted only for the approved repository demo corpus"
             )
-        if hashlib.sha256(raw_content).hexdigest() != DEMO_CORPUS_APPROVED_SHA256:
+        canonical_content = raw_content.replace(b"\r\n", b"\n")
+        if hashlib.sha256(canonical_content).hexdigest() != DEMO_CORPUS_APPROVED_SHA256:
             raise ValueError("repository demo corpus does not match its approved digest")
     elif approval_reference is not None:
         raise ValueError("only global demo corpus records may carry an approval reference")

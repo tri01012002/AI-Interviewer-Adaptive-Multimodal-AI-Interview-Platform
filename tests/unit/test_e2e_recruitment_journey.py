@@ -928,8 +928,11 @@ def test_worker_crash_recovers_expired_leases_and_fences_stale_commits(
         record.lease_expires_at = expired
         record.available_at = expired
 
-    assert application_id in CandidateApplicationService.discover_eligible(50)
-    RecruitmentCampaignWorker().dispatch_once()
+    eligible_applications = CandidateApplicationService.discover_eligible(50)
+    assert application_id in eligible_applications
+    worker = RecruitmentCampaignWorker()
+    for _ in range(eligible_applications.index(application_id) + 1):
+        worker.dispatch_once()
     with SessionLocal() as session:
         application = session.get(RecruitmentApplicationRecord, application_id)
         assert application.status == "needs_review"

@@ -1,8 +1,33 @@
-# Production Readiness
+# Production Readiness — P14.1
 
-As of 2026-11-24, `main` @ `4d2e7ad` plus uncommitted Milestone 12 changes. **Not production-ready.** See "Blockers".
+## Current P14.1 evidence
 
-## Verification levels
+- Baseline: `main` @ `71a3314edd7962ed0f6629291b403c5e6ef2ff37`;
+  `origin/main` is aligned. P14/P14.1 changes are uncommitted.
+- Full offline unit suite: **600 passed, 0 failed, 0 errors, 4 deselected** in
+  the project virtualenv against disposable SQLite and local-only settings.
+- Campaign/workflow group: **173 passed**. Fresh disposable SQLite migration
+  reached `g21_candidate_legal_hold (head)`; exactly one Alembic head.
+- Docker: **BLOCKED**; Docker daemon unavailable. Images and non-root runtime
+  permissions have not been built or inspected.
+- PostgreSQL on P14.1 changes: **BLOCKED**; no disposable service available.
+- Redis on P14.1 changes: **BLOCKED**; local disposable Redis 3.0.504 is below
+  the integration suite's Redis 6+ requirement.
+- GitHub Actions on P14.1 changes: **NOT VERIFIED**. The baseline P13 run failed
+  overall on RAG digest and campaign ordering tests; PostgreSQL, Redis 7, and
+  quality jobs passed on that baseline only.
+- No live provider requests were made. Product/legal retention and report
+  content decisions remain open.
+
+**NOT_CUSTOMER_READY.** See
+[`P14_1_STABILIZATION_REPORT.md`](./P14_1_STABILIZATION_REPORT.md) for exact
+commands, historical failures, verification evidence and blockers.
+
+The inventory below is the historical P13 capability assessment. It was not
+re-run in full during P14.1 and must not be interpreted as current
+PostgreSQL/Redis/deployment evidence.
+
+## Historical P13 verification levels
 
 | Level | Meaning | Where it happened |
 |---|---|---|
@@ -12,7 +37,7 @@ As of 2026-11-24, `main` @ `4d2e7ad` plus uncommitted Milestone 12 changes. **No
 | External providers | OpenAI, AssemblyAI, ElevenLabs, SMTP | **None verified.** Mock transports / stubs only |
 | Production deployment | Real environment, TLS, secrets, scaling | **None** |
 
-## Capability status
+## Historical P13 capability status
 
 | Capability | Status | Evidence |
 |---|---|---|
@@ -49,7 +74,7 @@ As of 2026-11-24, `main` @ `4d2e7ad` plus uncommitted Milestone 12 changes. **No
 - Campaign executions and communications: at-least-once processing, lease-token fenced commits, lease renewal while active. **Not exactly-once.**
 - Email: an SMTP failure while sending is `unknown` → `needs_attention` and requires explicit admin reconciliation; it is never retried automatically. A message accepted by the server whose worker then lost its lease is also left `unknown`.
 
-## Blockers before production
+## Historical P13 blockers before production
 1. Run the new CI jobs (`postgres-integration`, `redis-integration`) green on GitHub Actions.
 2. Product/legal: CV and interview data retention period, legal hold, what scores/outcomes/audit rows are retained, platform-support erasure policy (`docs/CANDIDATE_DATA_DELETION.md`).
 3. Live verification (authorized, spend-capped) of OpenAI, AssemblyAI, ElevenLabs and the SMTP relay.

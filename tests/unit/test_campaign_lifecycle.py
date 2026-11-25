@@ -865,7 +865,10 @@ def test_failure_on_one_application_does_not_block_unrelated_applications(
     app_b_id = upload_b.json()["id"]
 
     worker = RecruitmentCampaignWorker()
-    worker.dispatch_once()
+    eligible_applications = CandidateApplicationService.discover_eligible(1000)
+    assert app_b_id in eligible_applications
+    for _ in range(eligible_applications.index(app_b_id) + 1):
+        worker.dispatch_once()
 
     with SessionLocal() as session:
         rec_b = session.get(RecruitmentApplicationRecord, app_b_id)
@@ -984,8 +987,20 @@ def test_target_reached_prevents_dispatch_and_interview_starts(
     assert replay_1.status_code == 200
     assert replay_1.json()["interview_id"] == interview_1_id
 
-    assert CandidateApplicationService.discover_eligible(10) == []
-    assert CandidateCommunicationService.discover_eligible(10) == []
+    with SessionLocal.begin() as session:
+        pending_application = session.get(RecruitmentApplicationRecord, app_2)
+        assert pending_application is not None
+        pending_application.status = "pending"
+        pending_invitation = session.execute(
+            select(CandidateCommunicationRecord).where(
+                CandidateCommunicationRecord.application_id == app_2,
+                CandidateCommunicationRecord.template_type == "interview_invitation",
+            )
+        ).scalar_one()
+        pending_invitation.status = "approved"
+
+    assert app_2 not in CandidateApplicationService.discover_eligible(1000)
+    assert pending_invitation.id not in CandidateCommunicationService.discover_eligible(1000)
 
 
 def test_expired_deadline_and_terminal_outcomes_do_not_busy_loop(
@@ -1129,4 +1144,3 @@ def test_non_qualifying_outcomes_do_not_count_toward_headcount_target(
     ).json()
     assert progress2["qualifying_hires"] == 0
     assert progress2["remaining_hires"] == 2
-

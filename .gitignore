@@ -166,7 +166,6 @@ data/golden_dataset_local/
 
 # Docker
 docker-compose.override.yml
-.dockerignore
 
 # Kubernetes
 kube-config.yaml
