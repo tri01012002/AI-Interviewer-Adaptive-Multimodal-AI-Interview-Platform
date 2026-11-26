@@ -1,6 +1,6 @@
 # Customer Delivery Readiness — P14.1
 
-Audit date: 2026-11-25  
+Audit date: 2026-11-25
 Status: **NOT_CUSTOMER_READY**
 
 Latest stabilization evidence is in

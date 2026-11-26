@@ -27,7 +27,14 @@ async def register(payload: RegisterRequest):
     if payload.password == "" or len(payload.password) < 3:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Password is invalid")
     user = register_user(payload.email, payload.password, payload.role)
-    return {"message": "User registered successfully", "user": {"email": user["email"], "role": user["role"]}}
+    return {
+        "message": "User registered successfully",
+        "user": {
+            "id": user["id"],
+            "email": user["email"],
+            "role": user["role"],
+        },
+    }
 
 
 @router.post("/auth/login", tags=["Auth"], dependencies=[Depends(login_rate_limit)])

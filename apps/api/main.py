@@ -11,14 +11,14 @@ from fastapi import FastAPI, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
-from starlette.requests import Request
 from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
+from starlette.requests import Request
 
 from apps.api.middleware.request_context import REQUEST_ID_HEADER, RequestContextMiddleware
 from config import settings
 from infrastructure.redis_store import RedisClient
-from services.database import init_db
+from services.database import engine, init_db
 from services.support_access_audit import audit_platform_support_access
 from services.user_store import UserStore
 from utils import get_logger, metrics, setup_logging
@@ -72,11 +72,9 @@ async def lifespan(app: FastAPI):
         namespace="ai",
         socket_timeout=settings.REDIS_TIMEOUT_SECONDS,
     )
-    if app.state.redis_client._client is not None:
-        app.state.redis_client.ping()
-    
+
     yield
-    
+
     # Shutdown
     if hasattr(app.state, "redis_client"):
         app.state.redis_client.close()
@@ -167,11 +165,10 @@ async def health_ready():
     """Readiness probe for required runtime dependencies."""
     ready = True
     checks: dict[str, bool | str] = {"database": True, "redis": True}
-    engine = None
     database_started = time.perf_counter()
     try:
-        from sqlalchemy import create_engine, text
-        engine = create_engine(settings.DATABASE_URL, pool_pre_ping=True)
+        from sqlalchemy import text
+
         with engine.connect() as conn:
             conn.execute(text("SELECT 1"))
     except Exception as exc:
@@ -181,30 +178,11 @@ async def health_ready():
             "Database readiness check failed",
             extra={"failure_type": type(exc).__name__},
         )
-    finally:
-        if engine is not None:
-            try:
-                engine.dispose()
-            except Exception as exc:
-                ready = False
-                checks["database"] = False
-                logger.warning(
-                    "Database readiness client cleanup failed",
-                    extra={"failure_type": type(exc).__name__},
-                )
-
     _record_dependency("database", bool(checks["database"]), database_started)
 
-    client = None
     redis_started = time.perf_counter()
     try:
-        import redis
-
-        client = redis.Redis.from_url(
-            settings.REDIS_URL,
-            socket_timeout=settings.REDIS_TIMEOUT_SECONDS,
-        )
-        client.ping()
+        app.state.redis_client.ping()
     except Exception as exc:
         ready = False
         checks["redis"] = False
@@ -212,18 +190,6 @@ async def health_ready():
             "Redis readiness check failed",
             extra={"failure_type": type(exc).__name__},
         )
-    finally:
-        if client is not None:
-            try:
-                client.close()
-            except Exception as exc:
-                ready = False
-                checks["redis"] = False
-                logger.warning(
-                    "Redis readiness client cleanup failed",
-                    extra={"failure_type": type(exc).__name__},
-                )
-
     _record_dependency("redis", bool(checks["redis"]), redis_started)
 
     return JSONResponse(

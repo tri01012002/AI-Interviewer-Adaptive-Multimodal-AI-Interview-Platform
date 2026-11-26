@@ -313,6 +313,33 @@ class CandidateAvailabilityService:
             return [cls._serialize(session, record) for record in rows]
 
     @classmethod
+    def list_for_candidate(
+        cls, context: TenantContext
+    ) -> list[AvailabilityRequestResponse]:
+        if context.role != "candidate":
+            raise HTTPException(status_code=403, detail="Candidate access required")
+        with SessionLocal() as session:
+            rows = session.execute(
+                select(CandidateAvailabilityRequestRecord)
+                .join(
+                    CandidateRecord,
+                    and_(
+                        CandidateRecord.id
+                        == CandidateAvailabilityRequestRecord.candidate_id,
+                        CandidateRecord.organization_id
+                        == CandidateAvailabilityRequestRecord.organization_id,
+                    ),
+                )
+                .where(
+                    CandidateAvailabilityRequestRecord.organization_id
+                    == context.organization_id,
+                    CandidateRecord.user_id == context.actor_user_id,
+                )
+                .order_by(CandidateAvailabilityRequestRecord.created_at.desc())
+            ).scalars()
+            return [cls._serialize(session, record) for record in rows]
+
+    @classmethod
     def submit_response(
         cls,
         request_id: str,

@@ -215,6 +215,103 @@ def create_candidate_and_campaign(client: TestClient, *, rubric=None):
     return tenant, candidate, candidate_headers, candidate_profile, campaign_id
 
 
+def test_campaign_and_candidate_application_lists_are_scoped(
+    client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setattr(settings, "CV_STORAGE_PATH", str(tmp_path))
+    tenant, _, candidate_headers, _, campaign_id = create_candidate_and_campaign(client)
+    candidate_headers = tenant_headers(candidate_headers, tenant.organization_id)
+
+    candidate_campaigns = client.get(
+        "/api/v1/candidate/recruitment-campaigns",
+        headers=candidate_headers,
+    )
+    assert candidate_campaigns.status_code == 200, candidate_campaigns.text
+    assert [item["id"] for item in candidate_campaigns.json()] == [campaign_id]
+    assert client.get(
+        "/api/v1/candidate/availability-requests",
+        headers=candidate_headers,
+    ).json() == []
+    assert client.get(
+        "/api/v1/candidate/interview-schedules",
+        headers=candidate_headers,
+    ).json() == []
+
+    submitted = submit_cv(client, tenant, candidate_headers, campaign_id)
+    assert submitted.status_code == 202, submitted.text
+    application_id = submitted.json()["id"]
+
+    recruiter_cv = client.get(
+        f"/api/v1/recruitment-applications/{application_id}/cv",
+        headers=tenant_headers(tenant.recruiter_headers, tenant.organization_id),
+    )
+    assert recruiter_cv.status_code == 200
+    assert recruiter_cv.headers["content-type"].startswith(DOCX_MEDIA_TYPE)
+    assert recruiter_cv.content.startswith(b"PK")
+    candidate_cv = client.get(
+        f"/api/v1/recruitment-applications/{application_id}/cv",
+        headers=candidate_headers,
+    )
+    assert candidate_cv.status_code == 200
+    assert candidate_cv.content == recruiter_cv.content
+
+    recruiter_list = client.get(
+        f"/api/v1/recruitment-campaigns/{campaign_id}/applications",
+        headers=tenant_headers(tenant.recruiter_headers, tenant.organization_id),
+    )
+    assert recruiter_list.status_code == 200, recruiter_list.text
+    assert len(recruiter_list.json()) == 1
+    assert recruiter_list.json()[0]["application"]["id"] == application_id
+    assert recruiter_list.json()[0]["candidate_email"].endswith("@example.com")
+
+    own_applications = client.get(
+        "/api/v1/candidate/applications",
+        headers=candidate_headers,
+    )
+    assert own_applications.status_code == 200, own_applications.text
+    assert [item["application"]["id"] for item in own_applications.json()] == [
+        application_id
+    ]
+
+    other_candidate, other_headers, _, _ = create_candidate_through_invitation(
+        client, tenant
+    )
+    assert other_candidate
+    other_applications = client.get(
+        "/api/v1/candidate/applications",
+        headers=tenant_headers(other_headers, tenant.organization_id),
+    )
+    assert other_applications.status_code == 200, other_applications.text
+    assert other_applications.json() == []
+    assert client.get(
+        f"/api/v1/recruitment-applications/{application_id}",
+        headers=tenant_headers(other_headers, tenant.organization_id),
+    ).status_code == 404
+    assert client.get(
+        f"/api/v1/recruitment-applications/{application_id}/cv",
+        headers=tenant_headers(other_headers, tenant.organization_id),
+    ).status_code == 404
+
+    other_tenant = create_tenant(client, "Other Synthetic Organization")
+    cross_tenant_list = client.get(
+        f"/api/v1/recruitment-campaigns/{campaign_id}/applications",
+        headers=tenant_headers(
+            other_tenant.recruiter_headers, other_tenant.organization_id
+        ),
+    )
+    assert cross_tenant_list.status_code == 404
+    assert client.get(
+        f"/api/v1/recruitment-applications/{application_id}/cv",
+        headers=tenant_headers(
+            other_tenant.recruiter_headers, other_tenant.organization_id
+        ),
+    ).status_code == 404
+    assert client.get(
+        f"/api/v1/recruitment-campaigns/{campaign_id}/applications",
+        headers=candidate_headers,
+    ).status_code == 403
+
+
 def test_cv_intake_is_idempotent_private_and_evidence_based(
     client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):

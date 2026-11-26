@@ -1,6 +1,6 @@
 # P14.1 Stabilization Report
 
-Date: 2026-11-25  
+Date: 2026-11-25
 Readiness: **NOT_CUSTOMER_READY**
 
 P14.1 stabilized reproducible offline test regressions. It did not establish

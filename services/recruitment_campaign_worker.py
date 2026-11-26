@@ -456,6 +456,8 @@ def _run_command() -> None:
     signal.signal(signal.SIGINT, request_stop)
     if hasattr(signal, "SIGTERM"):
         signal.signal(signal.SIGTERM, request_stop)
+    if hasattr(signal, "SIGBREAK"):
+        signal.signal(signal.SIGBREAK, request_stop)
     RecruitmentCampaignWorker(stop_event=stop_event).run()
 
 

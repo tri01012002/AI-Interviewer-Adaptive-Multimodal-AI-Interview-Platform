@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, File, HTTPException, Response, UploadFile, status
 
 from apps.api.middleware.rate_limit import cv_upload_rate_limit
 from config import settings
@@ -10,6 +10,8 @@ from services.candidate_application_service import (
     ApplicationResponse,
     ApplicationReviewRequest,
     CandidateApplicationService,
+    CampaignApplicationListItem,
+    CandidateApplicationListItem,
 )
 from services.candidate_availability_service import (
     AvailabilityRequestCreate,
@@ -43,6 +45,7 @@ from services.recruitment_campaign_service import (
     CampaignCreate,
     CampaignHiringOutcomeRequest,
     CampaignHiringOutcomeResponse,
+    CandidateCampaignResponse,
     CampaignObjectiveUpdate,
     CampaignProgressResponse,
     CampaignResponse,
@@ -72,6 +75,16 @@ async def create_campaign(
 @router.get("/recruitment-campaigns", response_model=list[CampaignResponse])
 async def list_campaigns(context: TenantContext = Depends(tenant_context)):
     return [RecruitmentCampaignService.serialize(c) for c in RecruitmentCampaignService.list_campaigns(context)]
+
+
+@router.get(
+    "/candidate/recruitment-campaigns",
+    response_model=list[CandidateCampaignResponse],
+)
+async def list_candidate_campaigns(
+    context: TenantContext = Depends(tenant_context),
+):
+    return RecruitmentCampaignService.list_candidate_campaigns(context)
 
 
 @router.get("/recruitment-campaigns/{campaign_id}", response_model=CampaignResponse)
@@ -296,6 +309,27 @@ async def submit_candidate_cv(
 
 
 @router.get(
+    "/recruitment-campaigns/{campaign_id}/applications",
+    response_model=list[CampaignApplicationListItem],
+)
+async def list_recruitment_applications(
+    campaign_id: str,
+    context: TenantContext = Depends(tenant_context),
+):
+    return CandidateApplicationService.list_for_campaign(campaign_id, context)
+
+
+@router.get(
+    "/candidate/applications",
+    response_model=list[CandidateApplicationListItem],
+)
+async def list_candidate_applications(
+    context: TenantContext = Depends(tenant_context),
+):
+    return CandidateApplicationService.list_for_candidate(context)
+
+
+@router.get(
     "/recruitment-applications/{application_id}",
     response_model=ApplicationResponse,
 )
@@ -304,6 +338,25 @@ async def get_recruitment_application(
     context: TenantContext = Depends(tenant_context),
 ):
     return CandidateApplicationService.get_application(application_id, context)
+
+
+@router.get("/recruitment-applications/{application_id}/cv")
+async def download_recruitment_application_cv(
+    application_id: str,
+    context: TenantContext = Depends(tenant_context),
+):
+    content, media_type, filename = CandidateApplicationService.get_cv(
+        application_id, context
+    )
+    return Response(
+        content=content,
+        media_type=media_type,
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Cache-Control": "private, no-store",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
 
 
 @router.post(
@@ -431,6 +484,16 @@ async def list_candidate_availability_requests(
 
 
 @router.get(
+    "/candidate/availability-requests",
+    response_model=list[AvailabilityRequestResponse],
+)
+async def list_candidate_availability_requests_for_candidate(
+    context: TenantContext = Depends(tenant_context),
+):
+    return CandidateAvailabilityService.list_for_candidate(context)
+
+
+@router.get(
     "/candidate-availability-requests/{request_id}",
     response_model=AvailabilityRequestResponse,
 )
@@ -515,6 +578,16 @@ async def list_interview_schedules(
     return InterviewSchedulingService.list_for_campaign(
         campaign_id, context, application_id=application_id
     )
+
+
+@router.get(
+    "/candidate/interview-schedules",
+    response_model=list[InterviewScheduleResponse],
+)
+async def list_candidate_interview_schedules(
+    context: TenantContext = Depends(tenant_context),
+):
+    return InterviewSchedulingService.list_for_candidate(context)
 
 
 @router.get(

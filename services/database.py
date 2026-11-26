@@ -1517,7 +1517,20 @@ class RAGDocumentRecord(Base):
     )
 
 
-engine = create_engine(_resolve_database_url(), future=True, echo=settings.SQLALCHEMY_ECHO)
+database_url = _resolve_database_url()
+engine_options = {
+    "future": True,
+    "echo": settings.SQLALCHEMY_ECHO,
+    "pool_pre_ping": True,
+}
+if database_url.startswith("postgresql"):
+    engine_options.update(
+        pool_size=settings.DB_POOL_SIZE,
+        max_overflow=settings.DB_MAX_OVERFLOW,
+        pool_timeout=settings.DB_POOL_TIMEOUT,
+        pool_recycle=settings.DB_POOL_RECYCLE,
+    )
+engine = create_engine(database_url, **engine_options)
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, expire_on_commit=False)
 
 

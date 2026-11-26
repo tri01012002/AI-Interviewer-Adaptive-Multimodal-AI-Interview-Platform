@@ -322,6 +322,14 @@ class CampaignResponse(BaseModel):
     updated_at: datetime
 
 
+class CandidateCampaignResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    job_description: str
+    created_at: datetime
+
+
 class RecruitmentCampaignService:
     @staticmethod
     def _audit_approval(
@@ -468,6 +476,33 @@ class RecruitmentCampaignService:
                 query = query.where(RecruitmentCampaignRecord.owner_user_id == context.actor_user_id)
             campaigns = session.execute(query.order_by(RecruitmentCampaignRecord.created_at.desc())).scalars().all()
             return list(campaigns)
+
+    @staticmethod
+    def list_candidate_campaigns(
+        context: TenantContext,
+    ) -> list[CandidateCampaignResponse]:
+        if context.role != "candidate":
+            raise HTTPException(status_code=403, detail="Candidate access required")
+        with SessionLocal() as session:
+            campaigns = session.execute(
+                select(RecruitmentCampaignRecord)
+                .where(
+                    RecruitmentCampaignRecord.organization_id
+                    == context.organization_id,
+                    RecruitmentCampaignRecord.approval_state == "approved",
+                    RecruitmentCampaignRecord.job_description.is_not(None),
+                )
+                .order_by(RecruitmentCampaignRecord.created_at.desc())
+            ).scalars()
+            return [
+                CandidateCampaignResponse(
+                    id=campaign.id,
+                    job_description=campaign.job_description or "",
+                    created_at=campaign.created_at,
+                )
+                for campaign in campaigns
+                if RecruitmentCampaignService.approval_is_current(campaign)
+            ]
 
     @staticmethod
     def update_campaign(

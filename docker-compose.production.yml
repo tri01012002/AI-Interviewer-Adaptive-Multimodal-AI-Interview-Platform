@@ -1,0 +1,59 @@
+services:
+  migrate:
+    image: ${API_IMAGE:?Set API_IMAGE to a versioned API image}
+    command: ["python", "-m", "alembic", "upgrade", "head"]
+    environment: &production_environment
+      DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL for the managed PostgreSQL database}
+      REDIS_URL: ${REDIS_URL:?Set REDIS_URL for the managed Redis service}
+      ENVIRONMENT: production
+      DEBUG: "false"
+      SECRET_KEY: ${SECRET_KEY:?Set SECRET_KEY using the deployment secret manager}
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:?Set ALLOWED_ORIGINS as a JSON array}
+      ENABLE_DEV_ADMIN_BOOTSTRAP: "false"
+      LLM_PROVIDER: none
+      EMBEDDING_PROVIDER: none
+      EMAIL_PROVIDER: offline_simulation
+      STORAGE_PATH: /app/storage
+      CV_STORAGE_PATH: /app/storage/private_cv
+    restart: on-failure
+
+  api:
+    image: ${API_IMAGE:?Set API_IMAGE to a versioned API image}
+    command: ["uvicorn", "apps.api.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    environment: *production_environment
+    ports:
+      - "${API_BIND_ADDRESS:-127.0.0.1}:8000:8000"
+    volumes:
+      - application_storage:/app/storage
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health/ready', timeout=4)"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    restart: unless-stopped
+
+  recruitment_campaign_worker:
+    image: ${WORKER_IMAGE:?Set WORKER_IMAGE to a versioned worker image}
+    command: ["python", "-m", "services.recruitment_campaign_worker", "run"]
+    environment: *production_environment
+    volumes:
+      - application_storage:/app/storage
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "python", "-m", "services.recruitment_campaign_worker", "status"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    stop_grace_period: 150s
+    restart: unless-stopped
+
+volumes:
+  application_storage:

@@ -1116,6 +1116,32 @@ class InterviewSchedulingService:
             return [cls._serialize(record) for record in records]
 
     @classmethod
+    def list_for_candidate(
+        cls, context: TenantContext
+    ) -> list[InterviewScheduleResponse]:
+        if context.role != "candidate":
+            raise HTTPException(status_code=403, detail="Candidate access required")
+        with SessionLocal() as session:
+            records = session.execute(
+                select(InterviewScheduleRecord)
+                .join(
+                    CandidateRecord,
+                    and_(
+                        CandidateRecord.id == InterviewScheduleRecord.candidate_id,
+                        CandidateRecord.organization_id
+                        == InterviewScheduleRecord.organization_id,
+                    ),
+                )
+                .where(
+                    InterviewScheduleRecord.organization_id
+                    == context.organization_id,
+                    CandidateRecord.user_id == context.actor_user_id,
+                )
+                .order_by(InterviewScheduleRecord.start_at.desc())
+            ).scalars()
+            return [cls._serialize(record) for record in records]
+
+    @classmethod
     def expire_due(cls, *, limit: int = 100, now: datetime | None = None) -> int:
         if not 1 <= limit <= 500:
             raise ValueError("Expiration batch limit must be between 1 and 500")

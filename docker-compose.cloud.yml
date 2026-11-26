@@ -1,0 +1,135 @@
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_DB: ai_interviewer
+      POSTGRES_USER: ai_interviewer
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD to a URL-safe random secret}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ai_interviewer -d ai_interviewer"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+
+  redis:
+    image: redis:7.2-alpine
+    command: ["redis-server", "--appendonly", "yes", "--save", "60", "1"]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+
+  migrate:
+    image: ai-interviewer-api:cloud-mvp
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.api
+    command: ["python", "-m", "alembic", "upgrade", "head"]
+    environment: &runtime_environment
+      DATABASE_URL: postgresql://ai_interviewer:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}@postgres:5432/ai_interviewer
+      REDIS_URL: redis://redis:6379/0
+      ENVIRONMENT: production
+      DEBUG: "false"
+      SECRET_KEY: ${SECRET_KEY:?Set SECRET_KEY using a secret manager}
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-[]}
+      FRONTEND_URL: ${FRONTEND_URL:-http://localhost}
+      ENABLE_DEV_ADMIN_BOOTSTRAP: "false"
+      LLM_PROVIDER: none
+      EMBEDDING_PROVIDER: none
+      EMAIL_PROVIDER: offline_simulation
+      STORAGE_TYPE: local
+      STORAGE_PATH: ${STORAGE_PATH:-/app/storage}
+      CV_STORAGE_PATH: ${CV_STORAGE_PATH:-/app/storage/private_cv}
+      VOICE_ENABLED: "false"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: "no"
+
+  api:
+    image: ai-interviewer-api:cloud-mvp
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.api
+    command: ["uvicorn", "apps.api.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    environment: *runtime_environment
+    init: true
+    volumes:
+      - application_storage:/app/storage
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health/ready', timeout=4)"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    restart: unless-stopped
+
+  recruitment_campaign_worker:
+    image: ai-interviewer-worker:cloud-mvp
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.worker
+    command: ["python", "-m", "services.recruitment_campaign_worker", "run"]
+    environment: *runtime_environment
+    init: true
+    volumes:
+      - application_storage:/app/storage
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "python", "-m", "services.recruitment_campaign_worker", "status"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    stop_grace_period: 150s
+    restart: unless-stopped
+
+  frontend:
+    image: ai-interviewer-frontend:cloud-mvp
+    build:
+      context: ${FRONTEND_CONTEXT:-../AI_platform_UI/AI-Interview}
+      dockerfile: Dockerfile
+      args:
+        VITE_API_BASE_URL: /api/v1
+    ports:
+      - "${HTTP_BIND_ADDRESS:-0.0.0.0}:80:8080"
+      - "${HTTPS_BIND_ADDRESS:-0.0.0.0}:443:8443"
+    volumes:
+      - ${TLS_CERT_DIR:-./certs}:/etc/nginx/certs:ro
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8080/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  redis_data:
+  application_storage:

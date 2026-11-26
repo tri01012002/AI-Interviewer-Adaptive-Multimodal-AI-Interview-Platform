@@ -19,7 +19,12 @@ class UserStore:
                 select(UserRecord).where(UserRecord.email == normalized_email)
             ).scalar_one_or_none()
             if existing is not None:
-                return {"email": existing.email, "role": existing.role, "password_hash": existing.password_hash}
+                return {
+                    "id": existing.id,
+                    "email": existing.email,
+                    "role": existing.role,
+                    "password_hash": existing.password_hash,
+                }
             user = UserRecord(email=normalized_email, password_hash=hash_password(password), role=role)
             session.add(user)
             session.commit()

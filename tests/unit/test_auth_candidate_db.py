@@ -17,6 +17,8 @@ def test_db_backed_auth_and_invitation_created_candidate_store(client: TestClien
         json={"email": "admin-db@example.com", "password": "secret123", "role": "admin"},
     )
     assert register.status_code == 200
+    assert register.json()["user"]["role"] == "candidate"
+    assert register.json()["user"]["id"]
 
     login = client.post(
         "/api/v1/auth/login",

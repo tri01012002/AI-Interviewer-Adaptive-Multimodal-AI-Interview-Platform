@@ -1,102 +1,113 @@
+# Local development stack only. Production uses docker-compose.production.yml
+# with externally managed PostgreSQL/Redis and required deployment secrets.
 services:
-  # ==========================================
-  # PostgreSQL Database with pgvector
-  # ==========================================
   postgres:
-    image: pgvector/pgvector:pg15
-    container_name: ai_interviewer_postgres
+    image: pgvector/pgvector:pg16
     environment:
       POSTGRES_USER: ai_interviewer
-      POSTGRES_PASSWORD: ai_interviewer_dev
+      POSTGRES_PASSWORD: local-dev-only
       POSTGRES_DB: ai_interviewer
     ports:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ai_interviewer"]
+      test: ["CMD-SHELL", "pg_isready -U ai_interviewer -d ai_interviewer"]
       interval: 5s
       timeout: 5s
       retries: 12
       start_period: 10s
+    restart: unless-stopped
 
-  # ==========================================
-  # Redis - Cache & Message Broker
-  # ==========================================
   redis:
     image: redis:7.2-alpine
-    container_name: ai_interviewer_redis
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
     ports:
       - "6379:6379"
-    volumes:
-      - redis_data:/data
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
       timeout: 5s
       retries: 12
       start_period: 5s
+    restart: unless-stopped
 
-  # ==========================================
-  # FastAPI Backend
-  # ==========================================
+  migrate:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.api
+    command: ["python", "-m", "alembic", "upgrade", "head"]
+    environment: &runtime_environment
+      DATABASE_URL: postgresql+psycopg2://ai_interviewer:local-dev-only@postgres:5432/ai_interviewer
+      REDIS_URL: redis://redis:6379/0
+      ENVIRONMENT: development
+      DEBUG: "true"
+      LLM_PROVIDER: none
+      EMBEDDING_PROVIDER: none
+      EMAIL_PROVIDER: offline_simulation
+      ENABLE_DEV_ADMIN_BOOTSTRAP: "false"
+      STORAGE_PATH: /app/storage
+      CV_STORAGE_PATH: /app/storage/private_cv
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
   api:
     build:
       context: .
       dockerfile: docker/Dockerfile.api
-    container_name: ai_interviewer_api
-    command: uvicorn apps.api.main:app --host 0.0.0.0 --port 8000 --reload
+    command:
+      ["uvicorn", "apps.api.main:app", "--host", "0.0.0.0", "--port", "8000"]
     ports:
       - "8000:8000"
-    environment:
-      DATABASE_URL: postgresql://ai_interviewer:ai_interviewer_dev@postgres:5432/ai_interviewer
-      REDIS_URL: redis://redis:6379/0
-      ENVIRONMENT: development
-      DEBUG: "true"
+    environment: *runtime_environment
+    init: true
     volumes:
-      - .:/app
-      - /app/__pycache__
+      - application_storage:/app/storage
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     healthcheck:
-      # python:3.11-slim has no curl; use the interpreter that is in the image.
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health/live', timeout=4)"]
+      test:
+        ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health/ready', timeout=4)"]
       interval: 10s
       timeout: 5s
       retries: 3
+      start_period: 20s
+    restart: unless-stopped
 
-  # ==========================================
-  # Recruitment Campaign Database Worker
-  # ==========================================
   recruitment_campaign_worker:
     build:
       context: .
       dockerfile: docker/Dockerfile.worker
-    container_name: ai_interviewer_worker
-    command: python -m services.recruitment_campaign_worker run
-    environment:
-      DATABASE_URL: postgresql://ai_interviewer:ai_interviewer_dev@postgres:5432/ai_interviewer
+    command: ["python", "-m", "services.recruitment_campaign_worker", "run"]
+    environment: *runtime_environment
+    init: true
     volumes:
-      - .:/app
-      - /app/__pycache__
+      - application_storage:/app/storage
     depends_on:
-      - postgres
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "python", "-m", "services.recruitment_campaign_worker", "status"]
       interval: 15s
       timeout: 5s
       retries: 3
       start_period: 30s
+    stop_grace_period: 150s
+    restart: unless-stopped
 
-  # ==========================================
-  # Legacy Celery monitoring (not used by recruitment campaign dispatch)
-  # ==========================================
   flower:
     image: mher/flower:2.0
-    container_name: ai_interviewer_flower
     command: celery -A apps.worker.celery_app flower --port=5555
     ports:
       - "5555:5555"
@@ -104,53 +115,46 @@ services:
       CELERY_BROKER_URL: redis://redis:6379/1
       CELERY_RESULT_BACKEND: redis://redis:6379/2
     depends_on:
-      - redis
-      - recruitment_campaign_worker
+      redis:
+        condition: service_healthy
+      recruitment_campaign_worker:
+        condition: service_healthy
     profiles:
       - legacy-celery
 
-  # ==========================================
-  # React Frontend (Optional)
-  # ==========================================
   web:
+    image: ai-interviewer-frontend:dev
     build:
-      context: ./apps/web
+      context: ${FRONTEND_CONTEXT:-../AI_platform_UI/AI-Interview}
       dockerfile: Dockerfile
-    container_name: ai_interviewer_web
+      args:
+        VITE_API_BASE_URL: /api/v1
     ports:
-      - "3000:3000"
-    environment:
-      REACT_APP_API_URL: http://localhost:8000
-      REACT_APP_WS_URL: ws://localhost:8000/ws
-    volumes:
-      - ./apps/web/src:/app/src
+      - "3000:8080"
     depends_on:
-      - api
-    profiles:
-      - frontend  # Enable with: docker-compose --profile frontend up
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8080/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
 
-  # ==========================================
-  # Prometheus - Metrics Collection
-  # ==========================================
   prometheus:
     image: prom/prometheus:latest
-    container_name: ai_interviewer_prometheus
     ports:
       - "9090:9090"
     volumes:
-      - ./docker/prometheus.yml:/etc/prometheus/prometheus.yml
+      - ./docker/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - prometheus_data:/prometheus
     command:
-      - '--config.file=/etc/prometheus/prometheus.yml'
+      - "--config.file=/etc/prometheus/prometheus.yml"
     profiles:
-      - monitoring  # Enable with: docker-compose --profile monitoring up
+      - monitoring
 
-  # ==========================================
-  # Grafana - Metrics Visualization
-  # ==========================================
   grafana:
     image: grafana/grafana:latest
-    container_name: ai_interviewer_grafana
     ports:
       - "3001:3000"
     environment:
@@ -163,64 +167,21 @@ services:
     profiles:
       - monitoring
 
-  # ==========================================
-  # pgAdmin - Database Management
-  # ==========================================
   pgadmin:
     image: dpage/pgadmin4:latest
-    container_name: ai_interviewer_pgadmin
     environment:
       PGADMIN_DEFAULT_EMAIL: admin@admin.com
       PGADMIN_DEFAULT_PASSWORD: admin
     ports:
       - "5050:80"
     depends_on:
-      - postgres
+      postgres:
+        condition: service_healthy
     profiles:
-      - tools  # Enable with: docker-compose --profile tools up
+      - tools
 
 volumes:
   postgres_data:
-  redis_data:
+  application_storage:
   prometheus_data:
   grafana_data:
-
-networks:
-  default:
-    name: ai_interviewer_network
-
-# Usage:
-# 
-# Start all core services:
-#   docker-compose up -d
-#
-# Start with frontend:
-#   docker-compose --profile frontend up -d
-#
-# Start with monitoring:
-#   docker-compose --profile monitoring up -d
-#
-# Start with tools (pgAdmin):
-#   docker-compose --profile tools up -d
-#
-# Start everything:
-#   docker-compose --profile frontend --profile monitoring --profile tools up -d
-#
-# View logs:
-#   docker-compose logs -f api
-#   docker-compose logs -f celery_worker
-#
-# Stop services:
-#   docker-compose down
-#
-# Rebuild images:
-#   docker-compose build
-#
-# Access:
-#   API: http://localhost:8000
-#   Docs: http://localhost:8000/docs
-#   Frontend: http://localhost:3000
-#   Flower (Tasks): http://localhost:5555
-#   Prometheus: http://localhost:9090
-#   Grafana: http://localhost:3001
-#   pgAdmin: http://localhost:5050

@@ -379,6 +379,8 @@ jobs:
       DATABASE_URL: postgresql+psycopg2://postgres:ci-disposable-password@127.0.0.1:5432/test_ci
       RUN_POSTGRES_TESTS: "1"
       REDIS_URL: redis://127.0.0.1:6379/0
+      REDIS_INTEGRATION_URL: redis://127.0.0.1:6379/15
+      RUN_RUNTIME_PROCESS_TESTS: "1"
       ENVIRONMENT: test
       ENABLE_DEV_ADMIN_BOOTSTRAP: "false"
       LLM_PROVIDER: none
@@ -448,6 +450,14 @@ jobs:
           --junitxml=postgres-workflows.xml
       - name: Fail if workflow tests skipped on PostgreSQL
         run: python tools/ci_assert_no_skips.py postgres-workflows.xml --min-tests 50
+      - name: Separate API and worker process journey
+        run: >-
+          python -m pytest
+          tests/runtime/test_api_worker_process_integration.py
+          --timeout=300 -ra
+          --junitxml=runtime-process.xml
+      - name: Fail if runtime process journey skipped
+        run: python tools/ci_assert_no_skips.py runtime-process.xml --min-tests 1
 
   redis-integration:
     name: Real Redis 7 integration

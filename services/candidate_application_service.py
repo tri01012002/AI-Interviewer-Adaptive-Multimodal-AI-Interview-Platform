@@ -78,6 +78,23 @@ class ApplicationReviewRequest(BaseModel):
     criteria: list[CriterionReview] = Field(min_length=1, max_length=100)
 
 
+class CampaignApplicationListItem(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    candidate_id: str
+    candidate_name: str
+    candidate_email: str
+    application: ApplicationResponse
+
+
+class CandidateApplicationListItem(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    campaign_id: str
+    job_description: str | None
+    application: ApplicationResponse
+
+
 class CandidateApplicationService:
     @classmethod
     def submit_cv(
@@ -958,6 +975,167 @@ class CandidateApplicationService:
             else:
                 RecruitmentCampaignService._assert_authorized(campaign, context)
             return cls._serialize(session, application)
+
+    @classmethod
+    def get_cv(
+        cls, application_id: str, context: TenantContext
+    ) -> tuple[bytes, str, str]:
+        if context.role not in {"candidate", "recruiter", "org_admin", "platform_admin"}:
+            raise HTTPException(status_code=403, detail="Application access denied")
+        with SessionLocal.begin() as session:
+            application = session.execute(
+                select(RecruitmentApplicationRecord).where(
+                    RecruitmentApplicationRecord.id == application_id,
+                    RecruitmentApplicationRecord.organization_id
+                    == context.organization_id,
+                )
+            ).scalar_one_or_none()
+            if application is None:
+                raise HTTPException(status_code=404, detail="CV not found")
+            campaign = session.execute(
+                select(RecruitmentCampaignRecord).where(
+                    RecruitmentCampaignRecord.id == application.campaign_id,
+                    RecruitmentCampaignRecord.organization_id
+                    == context.organization_id,
+                )
+            ).scalar_one_or_none()
+            if campaign is None:
+                raise HTTPException(status_code=404, detail="CV not found")
+            if context.role == "candidate":
+                owns_application = session.execute(
+                    select(CandidateRecord.id).where(
+                        CandidateRecord.id == application.candidate_id,
+                        CandidateRecord.organization_id == context.organization_id,
+                        CandidateRecord.user_id == context.actor_user_id,
+                    )
+                ).scalar_one_or_none()
+                if owns_application is None:
+                    raise HTTPException(status_code=404, detail="CV not found")
+            else:
+                RecruitmentCampaignService._assert_authorized(campaign, context)
+            document = session.execute(
+                select(CandidateCVDocumentRecord).where(
+                    CandidateCVDocumentRecord.application_id == application.id,
+                    CandidateCVDocumentRecord.organization_id == context.organization_id,
+                )
+            ).scalar_one_or_none()
+            if document is None:
+                raise HTTPException(status_code=404, detail="CV not found")
+            storage_key = document.storage_key
+            media_type = document.media_type
+            extension = document.file_extension
+            session.add(
+                AccessAuditRecord(
+                    actor_user_id=context.actor_user_id,
+                    organization_id=context.organization_id,
+                    requested_organization_id=context.organization_id,
+                    action="candidate_cv_download_attempt",
+                    resource_type="recruitment_application",
+                    resource_id=application.id,
+                    outcome="allowed",
+                    support_reason=context.support_reason,
+                )
+            )
+        try:
+            content = CandidateCVStorage.read(storage_key)
+        except OSError as exc:
+            logger.exception(
+                "Private candidate CV storage read failed",
+                extra={
+                    "application_id": application_id,
+                    "organization_id": context.organization_id,
+                },
+            )
+            raise HTTPException(
+                status_code=503,
+                detail="Private CV storage is temporarily unavailable",
+            ) from exc
+        return content, media_type, f"candidate_cv{extension}"
+
+    @classmethod
+    def list_for_campaign(
+        cls, campaign_id: str, context: TenantContext
+    ) -> list[CampaignApplicationListItem]:
+        if context.role not in {"recruiter", "org_admin", "platform_admin"}:
+            raise HTTPException(status_code=403, detail="Application access denied")
+        with SessionLocal() as session:
+            campaign = session.execute(
+                select(RecruitmentCampaignRecord).where(
+                    RecruitmentCampaignRecord.id == campaign_id,
+                    RecruitmentCampaignRecord.organization_id == context.organization_id,
+                )
+            ).scalar_one_or_none()
+            if campaign is None:
+                raise HTTPException(status_code=404, detail="Campaign not found")
+            RecruitmentCampaignService._assert_authorized(campaign, context)
+            rows = session.execute(
+                select(RecruitmentApplicationRecord, CandidateRecord)
+                .join(
+                    CandidateRecord,
+                    and_(
+                        CandidateRecord.id == RecruitmentApplicationRecord.candidate_id,
+                        CandidateRecord.organization_id
+                        == RecruitmentApplicationRecord.organization_id,
+                    ),
+                )
+                .where(
+                    RecruitmentApplicationRecord.organization_id
+                    == context.organization_id,
+                    RecruitmentApplicationRecord.campaign_id == campaign_id,
+                )
+                .order_by(RecruitmentApplicationRecord.created_at.desc())
+            ).all()
+            return [
+                CampaignApplicationListItem(
+                    candidate_id=candidate.id,
+                    candidate_name=candidate.name,
+                    candidate_email=candidate.email,
+                    application=cls._serialize(session, application),
+                )
+                for application, candidate in rows
+            ]
+
+    @classmethod
+    def list_for_candidate(
+        cls, context: TenantContext
+    ) -> list[CandidateApplicationListItem]:
+        if context.role != "candidate":
+            raise HTTPException(status_code=403, detail="Candidate access required")
+        with SessionLocal() as session:
+            rows = session.execute(
+                select(RecruitmentApplicationRecord, RecruitmentCampaignRecord)
+                .join(
+                    CandidateRecord,
+                    and_(
+                        CandidateRecord.id == RecruitmentApplicationRecord.candidate_id,
+                        CandidateRecord.organization_id
+                        == RecruitmentApplicationRecord.organization_id,
+                    ),
+                )
+                .join(
+                    RecruitmentCampaignRecord,
+                    and_(
+                        RecruitmentCampaignRecord.id
+                        == RecruitmentApplicationRecord.campaign_id,
+                        RecruitmentCampaignRecord.organization_id
+                        == RecruitmentApplicationRecord.organization_id,
+                    ),
+                )
+                .where(
+                    RecruitmentApplicationRecord.organization_id
+                    == context.organization_id,
+                    CandidateRecord.user_id == context.actor_user_id,
+                )
+                .order_by(RecruitmentApplicationRecord.created_at.desc())
+            ).all()
+            return [
+                CandidateApplicationListItem(
+                    campaign_id=campaign.id,
+                    job_description=campaign.job_description,
+                    application=cls._serialize(session, application),
+                )
+                for application, campaign in rows
+            ]
 
     @classmethod
     def review_application(

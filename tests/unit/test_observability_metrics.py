@@ -124,14 +124,18 @@ def test_http_requests_are_counted_by_route_template_and_status_class(client):
 
 
 def test_readiness_updates_dependency_gauges(client, monkeypatch):
-    import redis
-    import sqlalchemy
+    from apps.api import main
 
     def fail_database(*_args, **_kwargs):
         raise RuntimeError("synthetic outage")
 
-    monkeypatch.setattr(sqlalchemy, "create_engine", fail_database)
-    monkeypatch.setattr(redis.Redis, "from_url", lambda *_a, **_k: MagicMock())
+    class DatabaseProbe:
+        def connect(self):
+            return fail_database()
+
+    redis_probe = MagicMock()
+    monkeypatch.setattr(main, "engine", DatabaseProbe())
+    monkeypatch.setattr(main.app.state, "redis_client", redis_probe, raising=False)
     assert client.get("/health/ready").status_code == 503
 
     assert value("dependency_up", dependency="database") == 0

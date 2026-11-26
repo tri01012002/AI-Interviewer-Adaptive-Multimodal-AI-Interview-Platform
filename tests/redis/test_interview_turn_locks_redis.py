@@ -45,7 +45,9 @@ def admin_redis():
         pytest.fail(f"REDIS_INTEGRATION_URL is not a real Redis server: {exc}")
     if "process_id" not in info or "redis_version" not in info:
         pytest.fail("REDIS_INTEGRATION_URL is not a real Redis server")
-    assert int(info["redis_version"].split(".")[0]) >= 6
+    assert int(info["redis_version"].split(".")[0]) == 7, (
+        "Redis integration tests require Redis 7"
+    )
     yield client
     client.close()
 

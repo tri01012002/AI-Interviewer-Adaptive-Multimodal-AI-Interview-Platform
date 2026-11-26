@@ -39,6 +39,9 @@ def admin_redis():
         pytest.fail(f"REDIS_INTEGRATION_URL is not a real Redis server: {exc}")
     if "process_id" not in info:
         pytest.fail("REDIS_INTEGRATION_URL is not a real Redis server")
+    assert int(info["redis_version"].split(".")[0]) == 7, (
+        "Redis integration tests require Redis 7"
+    )
     yield client
     client.close()
 
@@ -115,7 +118,7 @@ def test_login_endpoint_is_limited_through_real_redis(admin_redis, monkeypatch):
 def test_unreachable_redis_fails_open_for_rate_limiting(monkeypatch):
     try:
         with TestClient(app) as client:
-            # Switch only after startup (startup pings REDIS_URL).
+            # Switch only after startup to exercise the request-path outage.
             monkeypatch.setattr(settings, "REDIS_URL", "redis://127.0.0.1:1/0")
             monkeypatch.setattr(settings, "REDIS_TIMEOUT_SECONDS", 0.5)
             monkeypatch.setattr(settings, "RATE_LIMIT_FAIL_OPEN", True)
